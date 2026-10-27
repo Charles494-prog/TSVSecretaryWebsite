@@ -20,6 +20,13 @@ CREATE TABLE IF NOT EXISTS officers (
   UNIQUE KEY uq_officers_masterlist_number (masterlist_number)
 );
 
+CREATE TABLE IF NOT EXISTS suguan_weeks (
+  week_start DATE NOT NULL,
+  services LONGTEXT NOT NULL,
+  updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  PRIMARY KEY (week_start)
+);
+
 CREATE TABLE IF NOT EXISTS app_settings (
   setting_key VARCHAR(64) NOT NULL,
   setting_value VARCHAR(150) NOT NULL DEFAULT '',
@@ -32,6 +39,11 @@ INSERT IGNORE INTO app_settings (setting_key, setting_value) VALUES
   ('tsv_lead', ''),
   ('assistant_tsv_lead', ''),
   ('tsv_secretary', ''),
+  ('locale_name', 'FYM AVENUE'),
+  ('district_name', 'MARIKINA'),
+  ('district_supervisor', 'CYRUS JOSE E. DIZON'),
+  ('district_tsv_overseer', ''),
+  ('webex_display_name', 'MKN-FYM Avenue'),
   ('print_form_pagpapalaganp', '1'),
   ('print_form_weekly_attendance', '1'),
   ('print_form_meeting_agenda', '1'),
@@ -40,4 +52,7 @@ INSERT IGNORE INTO app_settings (setting_key, setting_value) VALUES
   ('print_form_resumen_form6', '1'),
   ('print_form_hymnfiles_deleted', '1'),
   ('print_form_tsv_form3', '0'),
-  ('print_form_directory_report', '0');
+  ('print_form_directory_report', '0'),
+  ('print_form_monthly_attendance', '0'),
+  ('weekly_meeting_datetime', ''),
+  ('weekly_meeting_venue', '');

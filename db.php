@@ -16,6 +16,5 @@ try {
     ]);
 } catch (PDOException $e) {
     error_log('Database connection failed: ' . $e->getMessage());
-    http_response_code(500);
-    exit('Could not connect to the database. Please make sure MySQL is running, database.sql has been imported, and the credentials in db.php are correct.');
+    $pdo = null;
 }
