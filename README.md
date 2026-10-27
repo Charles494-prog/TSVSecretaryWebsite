@@ -45,3 +45,14 @@ To extend an existing database for the imported masterlist fields, run `migrate_
 For an existing database with the older officer-role spelling, run `migrate_officer_role_label.sql` once to rename those records to `Locale TSV Officer`.
 
 The default XAMPP database account is often `root` with no password. Set a password for MySQL and update `db.php` before exposing the site beyond your local machine. This starter app does not include user login or role-based access.
+
+## Installing on another PC
+
+`tsv-secretary.bat` does everything:
+
+- **Site not installed yet:** installs XAMPP 8.2.12 if missing (asking for administrator permission once), downloads the site zip from the Google Drive link in `DRIVE_LINK`, copies it to `C:\xampp\htdocs\tsv_secretary_website`, starts MySQL and Apache, creates the `tsv_secretary` database from `database.sql`, adds a **TSV Secretary** desktop shortcut, and opens the site.
+- **Site already installed:** starts MySQL and Apache in the background (if they are not running) and opens the site.
+
+To prepare it: zip this folder (select all files, then **Send to > Compressed (zipped) folder**; the hidden `.git` folder is not needed), upload the zip to Google Drive shared as **Anyone with the link**, and paste the share link into `DRIVE_LINK` in `tsv-secretary.bat`. Then send only the .bat file to the new PC.
+
+The new database starts empty. To bring the officer records over, use **Export SQL** on the old PC and **Import** on the new one.

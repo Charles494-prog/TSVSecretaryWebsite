@@ -1,8 +1,123 @@
+// ---- toasts: short success / error messages in the corner ----
+const toastRegion = document.querySelector('[data-toasts]');
+const toastIcons = {
+    success: '<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 6 9 17l-5-5"/></svg>',
+    error: '<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" aria-hidden="true"><path d="M18 6 6 18M6 6l12 12"/></svg>',
+    info: '<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" aria-hidden="true"><path d="M12 16v-4M12 8h.01"/></svg>',
+};
+
+function showToast(title, message = '', type = 'success') {
+    if (!toastRegion) {
+        return;
+    }
+    const toast = document.createElement('div');
+    toast.className = `toast toast-${type}`;
+    toast.setAttribute('role', type === 'error' ? 'alert' : 'status');
+    const icon = document.createElement('span');
+    icon.className = 'toast-icon';
+    icon.innerHTML = toastIcons[type] || toastIcons.success;
+    const text = document.createElement('div');
+    const heading = document.createElement('strong');
+    heading.textContent = title;
+    text.append(heading);
+    if (message) {
+        const body = document.createElement('p');
+        body.textContent = message;
+        text.append(body);
+    }
+    toast.append(icon, text);
+    toast.addEventListener('click', () => toast.remove());
+    toastRegion.append(toast);
+    window.setTimeout(() => toast.classList.add('is-leaving'), 4200);
+    window.setTimeout(() => toast.remove(), 4600);
+}
+
+const pendingToast = document.querySelector('#toast-data');
+if (pendingToast) {
+    try {
+        const data = JSON.parse(pendingToast.textContent);
+        showToast(data.title, data.message, data.type);
+    } catch {
+        // A malformed message is simply not shown.
+    }
+}
+
+// ---- "Are you sure?" dialog for forms marked data-confirm ----
+const confirmDialog = document.querySelector('#confirm-dialog');
+let confirmForm = null;
 document.querySelectorAll('form[data-confirm]').forEach((form) => {
     form.addEventListener('submit', (event) => {
-        if (!window.confirm(form.dataset.confirm)) {
-            event.preventDefault();
+        if (!confirmDialog) {
+            return;
         }
+        event.preventDefault();
+        confirmForm = form;
+        const safe = form.hasAttribute('data-confirm-safe');
+        confirmDialog.querySelector('[data-confirm-title]').textContent = form.dataset.confirmTitle || 'Are you sure?';
+        confirmDialog.querySelector('[data-confirm-message]').textContent = form.dataset.confirm;
+        const ok = confirmDialog.querySelector('[data-confirm-ok]');
+        ok.textContent = form.dataset.confirmButton || 'Delete';
+        ok.classList.toggle('button-danger', !safe);
+        confirmDialog.querySelector('[data-confirm-icon]').hidden = safe;
+        confirmDialog.showModal();
+        confirmDialog.querySelector('[data-confirm-cancel]').focus();
+    });
+});
+confirmDialog?.querySelector('[data-confirm-cancel]').addEventListener('click', () => confirmDialog.close());
+confirmDialog?.querySelector('[data-confirm-ok]').addEventListener('click', () => {
+    confirmDialog.close();
+    // submit() skips the submit event, so the dialog does not open again
+    confirmForm?.submit();
+});
+confirmDialog?.addEventListener('click', (event) => {
+    if (event.target === confirmDialog) {
+        confirmDialog.close();
+    }
+});
+
+// ---- downloads: the server answers with a cookie holding our token; when it appears, the file was sent ----
+function newDownloadToken() {
+    return Math.random().toString(36).slice(2, 14);
+}
+
+function waitForDownload(token, onDone) {
+    const started = Date.now();
+    const timer = window.setInterval(() => {
+        if (document.cookie.split('; ').includes(`tsv_download=${token}`)) {
+            window.clearInterval(timer);
+            document.cookie = 'tsv_download=; Max-Age=0; path=/';
+            onDone();
+        } else if (Date.now() - started > 180000) {
+            window.clearInterval(timer);
+        }
+    }, 400);
+}
+
+document.querySelectorAll('form[data-download-toast]').forEach((form) => {
+    form.addEventListener('submit', (event) => {
+        const token = newDownloadToken();
+        form.querySelector('[name="download_token"]').value = token;
+        // other handlers may still cancel this submit (missing fields, unsaved Suguan); only then is nothing awaited
+        window.setTimeout(() => {
+            if (event.defaultPrevented) {
+                return;
+            }
+            waitForDownload(token, () => {
+                if (form.hasAttribute('data-download-close')) {
+                    form.closest('dialog')?.close();
+                }
+                showToast(form.dataset.downloadToast, form.dataset.downloadMessage || '');
+            });
+        }, 0);
+    });
+});
+
+document.querySelectorAll('a[data-download-toast]').forEach((link) => {
+    const base = link.getAttribute('href');
+    link.addEventListener('click', () => {
+        const token = newDownloadToken();
+        link.setAttribute('href', `${base}&download_token=${token}`);
+        waitForDownload(token, () => showToast(link.dataset.downloadToast, link.dataset.downloadMessage || ''));
     });
 });
 
@@ -419,6 +534,7 @@ statusForms.forEach((form) => {
             button.classList.toggle('status-inactive', !isActive);
 
             const name = row.querySelector('.name-cell')?.textContent.trim() || 'officer';
+            showToast('Status Updated', `${name} is now ${isActive ? 'Active' : 'Inactive'}.`);
             button.setAttribute(
                 'aria-label',
                 `Set ${name} to ${isActive ? 'inactive' : 'active'}`

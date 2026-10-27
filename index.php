@@ -165,8 +165,26 @@ function loadSettings(PDO $pdo): array
     ];
 }
 
+// A success message shown as a toast after the next page load.
+function flash(string $title, string $message = '', string $type = 'success'): void
+{
+    $_SESSION['toast'] = ['title' => $title, 'message' => $message, 'type' => $type];
+}
+
+// Blg. numbers are automatic: 1, 2, 3... in the current order, with no gaps.
+function renumberOfficers(PDO $pdo): void
+{
+    $pdo->exec('SET @n := 0');
+    $pdo->exec('UPDATE officers SET masterlist_number = (@n := @n + 1) ORDER BY masterlist_number IS NULL, masterlist_number, id');
+}
+
 function sendDownload(string $filename, string $contents, string $contentType): never
 {
+    // The page waits for this cookie to know the file arrived, then shows its "Form Generated!" style toast.
+    $token = $_POST['download_token'] ?? $_GET['download_token'] ?? '';
+    if (is_string($token) && preg_match('/^[a-z0-9]{6,32}$/', $token)) {
+        setcookie('tsv_download', $token, ['path' => '/', 'samesite' => 'Lax']);
+    }
     header('Content-Type: ' . $contentType);
     header('Content-Disposition: attachment; filename="' . $filename . '"');
     header('Content-Length: ' . strlen($contents));
@@ -200,15 +218,12 @@ if ($action === 'export_sql') {
     sendDownload('tsv-officers-' . date('Y-m-d') . '.sql', officersSqlDump($pdo), 'application/sql; charset=utf-8');
 }
 $errors = [];
-$notice = '';
 $expectsJson = str_contains(
     strtolower($_SERVER['HTTP_ACCEPT'] ?? ''),
     'application/json'
 ) || strtolower($_SERVER['HTTP_X_REQUESTED_WITH'] ?? '') === 'xmlhttprequest';
-if (isset($_SESSION['notice']) && is_string($_SESSION['notice'])) {
-    $notice = $_SESSION['notice'];
-}
-unset($_SESSION['notice']);
+$toast = isset($_SESSION['toast']) && is_array($_SESSION['toast']) ? $_SESSION['toast'] : null;
+unset($_SESSION['toast']);
 $search = '';
 
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
@@ -266,9 +281,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         } else {
             try {
                 $count = importOfficers($pdo, $preview['records'], $preview['mode'] === 'replace');
-                $_SESSION['notice'] = $preview['mode'] === 'replace'
-                    ? "Imported {$count} officer records, replacing the previous records."
-                    : "Added {$count} officer records.";
+                renumberOfficers($pdo);
+                flash('Import Complete', $preview['mode'] === 'replace'
+                    ? "{$count} officer records were restored."
+                    : "{$count} officer records were added.");
                 header('Location: index.php');
                 exit;
             } catch (PDOException $e) {
@@ -279,7 +295,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         }
     } elseif ($postAction === 'import_cancel') {
         unset($_SESSION['import_preview']);
-        $_SESSION['notice'] = 'Import cancelled. No records were changed.';
+        flash('Import Cancelled', 'No records were changed.', 'info');
         header('Location: index.php');
         exit;
     } elseif ($postAction === 'save_suguan') {
@@ -616,11 +632,17 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             $errors[] = 'A valid officer ID is required.';
         } else {
             try {
+                $nameStatement = $pdo->prepare('SELECT name FROM officers WHERE id = :id');
+                $nameStatement->execute(['id' => $id]);
+                $deletedName = $nameStatement->fetchColumn();
                 $statement = $pdo->prepare('DELETE FROM officers WHERE id = :id');
                 $statement->execute(['id' => $id]);
-                $_SESSION['notice'] = $statement->rowCount() > 0
-                    ? 'Officer record deleted.'
-                    : 'That officer record was not found.';
+                if ($statement->rowCount() > 0) {
+                    renumberOfficers($pdo);
+                    flash('Officer Deleted', $deletedName . ' was removed from the masterlist.');
+                } else {
+                    flash('Not Found', 'That officer record no longer exists.', 'error');
+                }
             } catch (PDOException $e) {
                 error_log('Delete officer failed: ' . $e->getMessage());
                 $errors[] = 'Could not delete the officer record. Please try again.';
@@ -659,7 +681,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                         echo json_encode(['success' => false, 'message' => 'That officer record was not found.']);
                         exit;
                     }
-                    $_SESSION['notice'] = 'That officer record was not found.';
+                    flash('Not Found', 'That officer record no longer exists.', 'error');
                 } else {
                     $newStatus = (int) $newStatus;
                     if ($isAjaxRequest) {
@@ -667,7 +689,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                         echo json_encode(['success' => true, 'is_active' => $newStatus]);
                         exit;
                     }
-                    $_SESSION['notice'] = 'Officer status updated.';
+                    flash('Status Updated');
                 }
             } catch (PDOException $e) {
                 error_log('Toggle officer status failed: ' . $e->getMessage());
@@ -718,7 +740,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     $statement->execute(['setting_key' => $key, 'setting_value' => $value]);
                 }
                 $pdo->commit();
-                $_SESSION['notice'] = 'Signatories saved.';
+                flash('Signatory Saved', 'The names on generated forms were updated.');
                 header('Location: index.php?action=settings');
                 exit;
             } catch (PDOException $e) {
@@ -736,12 +758,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $id = $idValue === '' ? null : filter_var($idValue, FILTER_VALIDATE_INT);
         $rawName = $_POST['name'] ?? '';
         $rawTungkulin = $_POST['tungkulin'] ?? '';
-        $rawRosterNumber = $_POST['masterlist_number'] ?? '';
         $rawContact = $_POST['contact_telegram'] ?? '';
         $name = is_string($rawName) ? trim($rawName) : '';
         $tungkulin = is_string($rawTungkulin) ? trim($rawTungkulin) : '';
-        $rosterNumberValue = is_string($rawRosterNumber) || is_int($rawRosterNumber) ? trim((string) $rawRosterNumber) : '';
-        $masterlistNumber = $rosterNumberValue === '' ? null : filter_var($rosterNumberValue, FILTER_VALIDATE_INT);
         $rawContactValue = is_string($rawContact) ? trim($rawContact) : '';
         $contactTelegram = $rawContactValue === '' ? null : $rawContactValue;
         $isActive = ($_POST['is_active'] ?? '') === '1' ? 1 : 0;
@@ -756,12 +775,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 
         if ($idValue !== '' && (!is_int($id) || $id < 1)) {
             $errors[] = 'A valid officer ID is required.';
-        }
-        if ($rosterNumberValue !== '' && (!is_int($masterlistNumber) || $masterlistNumber < 1)) {
-            $errors[] = 'Roster number must be a positive whole number.';
-        }
-        if (is_string($masterlistNumber) || (is_int($masterlistNumber) && $masterlistNumber < 1)) {
-            $errors[] = 'Roster number must be a positive whole number.';
         }
         if ($name === '' || mb_strlen($name) > 150) {
             $errors[] = 'Name is required and must be 150 characters or fewer.';
@@ -779,6 +792,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         if (!$errors) {
             try {
                 if ($id === null) {
+                    $masterlistNumber = (int) $pdo->query('SELECT COALESCE(MAX(masterlist_number), 0) + 1 FROM officers')->fetchColumn();
                     $statement = $pdo->prepare(
                         'INSERT INTO officers (masterlist_number, name, tungkulin, oath_taking_date, oath_taking_text,
                              ndi_signing_date, ndi_signing_text, birthday, contact_telegram, is_active)
@@ -797,18 +811,17 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                         'birthday' => $birthday,
                         'contact_telegram' => $contactTelegram,
                     ]);
-                    $_SESSION['notice'] = 'Officer record added.';
+                    flash('Officer Added', $name . ' was added as Blg. ' . $masterlistNumber . '.');
                 } else {
                     $statement = $pdo->prepare(
                         'UPDATE officers
-                         SET masterlist_number = :masterlist_number, name = :name, tungkulin = :tungkulin,
+                         SET name = :name, tungkulin = :tungkulin,
                              oath_taking_date = :oath_taking_date, oath_taking_text = :oath_taking_text,
                              ndi_signing_date = :ndi_signing_date, ndi_signing_text = :ndi_signing_text,
                              is_active = :is_active, birthday = :birthday, contact_telegram = :contact_telegram
                          WHERE id = :id'
                     );
                     $statement->execute([
-                        'masterlist_number' => $masterlistNumber,
                         'name' => $name,
                         'tungkulin' => $tungkulin,
                         'oath_taking_date' => $oathDate,
@@ -820,9 +833,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                         'contact_telegram' => $contactTelegram,
                         'id' => $id,
                     ]);
-                    $_SESSION['notice'] = $statement->rowCount() > 0
-                        ? 'Officer record updated.'
-                        : 'Officer record updated.';
+                    flash('Officer Updated', $name . '\'s record was saved.');
                 }
 
                 header('Location: index.php');
@@ -860,6 +871,10 @@ if ($action === 'form' && $_SERVER['REQUEST_METHOD'] !== 'POST' && isset($_GET['
 $officers = [];
 $statusFilter = 'all';
 if ($action === 'list') {
+    // Records added before numbering was automatic (or restored without a number) get one here.
+    if ((int) $pdo->query('SELECT COUNT(*) FROM officers WHERE masterlist_number IS NULL')->fetchColumn() > 0) {
+        renumberOfficers($pdo);
+    }
     $rawSearch = $_GET['search'] ?? '';
     $search = is_string($rawSearch) ? trim($rawSearch) : '';
     if (mb_strlen($search) > 150) {
@@ -963,6 +978,8 @@ function icon(string $name): string
         'chevron-right' => '<path d="m9 18 6-6-6-6"/>',
         'sort' => '<path d="m3 16 4 4 4-4M7 20V4M21 8l-4-4-4 4M17 4v16"/>',
         'sheet' => '<path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6M8 13h8M8 17h8M10 9H8"/>',
+        'trash' => '<path d="M3 6h18"/><path d="M8 6V4h8v2"/><path d="m19 6-1 14H6L5 6"/><path d="M10 11v6M14 11v6"/>',
+        'check' => '<path d="M20 6 9 17l-5-5"/>',
         'upload' => '<path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><path d="m17 8-5-5-5 5"/><path d="M12 3v12"/>',
         'database' => '<ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M3 5v14c0 1.7 4 3 9 3s9-1.3 9-3V5"/><path d="M3 12c0 1.7 4 3 9 3s9-1.3 9-3"/>',
     ];
@@ -1052,7 +1069,6 @@ $formValues = is_array($editingOfficer) ? $editingOfficer : [
 ];
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && $action === 'form') {
     $repostId = $_POST['id'] ?? '';
-    $repostRosterNumber = $_POST['masterlist_number'] ?? '';
     $repostName = $_POST['name'] ?? '';
     $repostTungkulin = $_POST['tungkulin'] ?? '';
     $repostOath = $_POST['oath_taking_date'] ?? '';
@@ -1061,7 +1077,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && $action === 'form') {
     $repostContact = $_POST['contact_telegram'] ?? '';
     $formValues = array_merge($formValues, [
         'id' => is_string($repostId) || is_int($repostId) ? (string) $repostId : '',
-        'masterlist_number' => is_string($repostRosterNumber) || is_int($repostRosterNumber) ? (string) $repostRosterNumber : '',
         'name' => is_string($repostName) ? trim($repostName) : '',
         'tungkulin' => is_string($repostTungkulin) ? trim($repostTungkulin) : '',
         'oath_taking_date' => is_string($repostOath) ? $repostOath : '',
@@ -1089,7 +1104,7 @@ $isEditing = !empty($formValues['id']);
             document.documentElement.dataset.theme = 'dark';
         }
     </script>
-    <link rel="stylesheet" href="style.css?v=18">
+    <link rel="stylesheet" href="style.css?v=19">
 </head>
 <body>
 <div class="shell">
@@ -1139,9 +1154,6 @@ $isEditing = !empty($formValues['id']);
         </header>
 
         <main class="content">
-            <?php if ($notice): ?>
-                <div class="alert alert-success"><?= h($notice) ?></div>
-            <?php endif; ?>
             <?php foreach ($errors as $error): ?>
                 <div class="alert alert-error"><?= h($error) ?></div>
             <?php endforeach; ?>
@@ -1248,7 +1260,7 @@ $isEditing = !empty($formValues['id']);
                             <input type="hidden" name="action" value="import_cancel">
                             <button class="button button-light" type="submit">Cancel</button>
                         </form>
-                        <form method="post" action="index.php" data-confirm="<?= $isReplace ? 'Delete all current officer records and import ' . count($preview['records']) . ' records? This cannot be undone.' : 'Add ' . count($preview['records']) . ' officer records?' ?>">
+                        <form method="post" action="index.php" data-confirm="<?= $isReplace ? 'All ' . $officerTotals['total'] . ' current officer records will be deleted and replaced with ' . count($preview['records']) . ' records from the file. This cannot be undone.' : count($preview['records']) . ' officer records will be added to the masterlist.' ?>" data-confirm-title="<?= $isReplace ? 'Replace all officer records?' : 'Add these officers?' ?>" data-confirm-button="<?= $isReplace ? 'Replace all' : 'Add officers' ?>"<?= $isReplace ? '' : ' data-confirm-safe' ?>>
                             <input type="hidden" name="csrf_token" value="<?= h($_SESSION['csrf_token']) ?>">
                             <input type="hidden" name="action" value="import_commit">
                             <button class="button <?= $isReplace ? 'button-danger' : '' ?>" type="submit"><?= $isReplace ? 'Yes, replace all records' : 'Yes, add ' . count($preview['records']) . ' records' ?></button>
@@ -1259,7 +1271,9 @@ $isEditing = !empty($formValues['id']);
                 <div class="page-title">
                     <a class="back-link" href="index.php"><?= icon('arrow-left') ?>Back to officers</a>
                     <h1><?= $isEditing ? 'Edit officer' : 'Add officer' ?></h1>
-                    <p><?= $isEditing ? 'Update this officer record. Changes appear in the next generated masterlist.' : 'Create a new officer record for the masterlist.' ?></p>
+                    <p><?= $isEditing
+                        ? 'Blg. ' . h((string) ($formValues['masterlist_number'] ?? '')) . ' · Changes appear in the next generated masterlist.'
+                        : 'The Blg. number is given automatically.' ?></p>
                 </div>
                 <section class="panel form-panel">
                     <form method="post" action="index.php?action=form<?= $isEditing ? '&amp;id=' . rawurlencode((string) $formValues['id']) : '' ?>">
@@ -1267,10 +1281,6 @@ $isEditing = !empty($formValues['id']);
                         <input type="hidden" name="action" value="save">
                         <input type="hidden" name="id" value="<?= h((string) $formValues['id']) ?>">
                         <div class="panel-body form-grid">
-                            <label class="field">
-                                <span>Masterlist number</span>
-                                <input name="masterlist_number" type="number" min="1" step="1" value="<?= h((string) ($formValues['masterlist_number'] ?? '')) ?>">
-                            </label>
                             <label class="field field-wide">
                                 <span>Name <b>*</b></span>
                                 <input name="name" type="text" maxlength="150" required value="<?= h((string) $formValues['name']) ?>" autocomplete="name">
@@ -1325,9 +1335,10 @@ $isEditing = !empty($formValues['id']);
                     </div>
                     <div class="page-title-actions">
                         <button class="button button-light" type="button" data-open-import><?= icon('upload') ?>Import</button>
-                        <a class="button button-light" href="index.php?action=export_sql" title="Backup of the officer records table"><?= icon('database') ?>Export SQL</a>
-                        <a class="button button-light" href="index.php?action=export_xlsx"><?= icon('sheet') ?>Export Excel</a>
-                        <form method="post" action="index.php">
+                        <a class="button button-light" href="index.php?action=export_sql" title="Backup of the officer records table" data-download-toast="Backup Exported" data-download-message="The officer records were saved as an SQL file."><?= icon('database') ?>Export SQL</a>
+                        <a class="button button-light" href="index.php?action=export_xlsx" data-download-toast="Excel Exported" data-download-message="The masterlist was saved as an Excel file."><?= icon('sheet') ?>Export Excel</a>
+                        <form method="post" action="index.php" data-download-toast="Masterlist Generated!" data-download-message="The masterlist DOCX is downloading.">
+                            <input type="hidden" name="download_token" value="">
                             <input type="hidden" name="csrf_token" value="<?= h($_SESSION['csrf_token']) ?>">
                             <input type="hidden" name="action" value="generate_masterlist">
                             <button class="button" type="submit"><?= icon('download') ?>Generate masterlist DOCX</button>
@@ -1449,12 +1460,12 @@ $isEditing = !empty($formValues['id']);
                                             <td class="muted"><?= h(displayDate($officer['birthday'])) ?></td>
                                             <td class="mono"><?= h($officer['contact_telegram'] ?? '') ?></td>
                                             <td class="row-actions">
-                                                <a href="index.php?action=form&amp;id=<?= h((string) $officer['id']) ?>">Edit</a>
-                                                <form method="post" action="index.php" data-confirm="Delete <?= h($officer['name']) ?>? This cannot be undone.">
+                                                <a class="row-icon" href="index.php?action=form&amp;id=<?= h((string) $officer['id']) ?>" aria-label="Edit <?= h($officer['name']) ?>" title="Edit"><?= icon('pen') ?></a>
+                                                <form method="post" action="index.php" data-confirm="<?= h($officer['name']) ?> will be removed from the masterlist. This cannot be undone." data-confirm-title="Delete this officer?" data-confirm-button="Delete">
                                                     <input type="hidden" name="csrf_token" value="<?= h($_SESSION['csrf_token']) ?>">
                                                     <input type="hidden" name="action" value="delete">
                                                     <input type="hidden" name="id" value="<?= h((string) $officer['id']) ?>">
-                                                    <button class="link-button delete-link" type="submit">Delete</button>
+                                                    <button class="row-icon row-icon-danger" type="submit" aria-label="Delete <?= h($officer['name']) ?>" title="Delete"><?= icon('trash') ?></button>
                                                 </form>
                                             </td>
                                         </tr>
@@ -1505,9 +1516,10 @@ $isEditing = !empty($formValues['id']);
                     </form>
                 </dialog>
                 <dialog class="generator-dialog" id="print-generator" aria-labelledby="generator-title">
-                    <form method="post" action="index.php" class="generator-form">
+                    <form method="post" action="index.php" class="generator-form" data-download-toast="Form Generated!" data-download-message="Your forms are downloading." data-download-close>
                         <input type="hidden" name="csrf_token" value="<?= h($_SESSION['csrf_token']) ?>">
                         <input type="hidden" name="action" value="generate_print_forms">
+                        <input type="hidden" name="download_token" value="">
                         <div class="generator-heading">
                             <div>
                                 <h2 id="generator-title">Generate forms</h2>
@@ -1689,7 +1701,18 @@ $isEditing = !empty($formValues['id']);
         </main>
     </div>
 </div>
-<script src="app.js?v=19"></script>
+<dialog class="confirm-dialog" id="confirm-dialog" aria-labelledby="confirm-title">
+    <div class="confirm-icon" data-confirm-icon><?= icon('trash') ?></div>
+    <h2 id="confirm-title" data-confirm-title>Are you sure?</h2>
+    <p data-confirm-message></p>
+    <div class="form-actions">
+        <button class="button button-light" type="button" data-confirm-cancel>Cancel</button>
+        <button class="button button-danger" type="button" data-confirm-ok>Delete</button>
+    </div>
+</dialog>
+<div class="toast-region" data-toasts aria-live="polite"></div>
+<?php if ($toast): ?><script type="application/json" id="toast-data"><?= json_encode($toast, JSON_HEX_TAG | JSON_HEX_AMP | JSON_HEX_APOS | JSON_HEX_QUOT) ?></script><?php endif; ?>
+<script src="app.js?v=20"></script>
 <?php if ($action === 'list'): ?><script src="suguan.js?v=5"></script><?php endif; ?>
 </body>
 </html>
