@@ -135,7 +135,7 @@ const openGeneratorButtons = document.querySelectorAll('[data-open-generator]');
 const agendaCheckbox = generatorForm?.querySelector('input[value="meeting_agenda"]');
 const agendaFields = generatorForm?.querySelector('[data-agenda-fields]');
 const agendaInputs = agendaFields?.querySelectorAll(
-    '[name="first_prayer"], [name="last_prayer"], [name="agenda_topics"]'
+    '[name="agenda_topics"]'
 );
 const importDialog = document.querySelector('#import-dialog');
 const dbLabel = document.querySelector('[data-db-label]');
@@ -185,7 +185,9 @@ const dropzone = importDialog?.querySelector('[data-dropzone]');
 const importFileInput = importDialog?.querySelector('[data-import-file]');
 const dropzoneTitle = importDialog?.querySelector('[data-dropzone-title]');
 const dropzoneHint = importDialog?.querySelector('[data-dropzone-hint]');
-const importMaxBytes = 5 * 1024 * 1024;
+const importMaxBytes = Number(dropzoneHint?.dataset.maxBytes) || 40 * 1024 * 1024;
+const importLimitText = formatFileSize(importMaxBytes);
+const importIdleHint = dropzoneHint?.textContent ?? '';
 
 function formatFileSize(bytes) {
     return bytes < 1024 * 1024 ? `${Math.max(1, Math.round(bytes / 1024))} KB` : `${(bytes / 1024 / 1024).toFixed(1)} MB`;
@@ -197,7 +199,7 @@ function showImportFile() {
     if (file && !/\.(sql|mysql|txt)$/i.test(file.name)) {
         problem = 'That is not a .sql or .mysql backup file.';
     } else if (file && file.size > importMaxBytes) {
-        problem = 'That file is larger than 5 MB.';
+        problem = `That file is larger than ${importLimitText}.`;
     }
     importFileInput.setCustomValidity(problem);
     dropzone.classList.toggle('has-file', Boolean(file) && !problem);
@@ -205,7 +207,7 @@ function showImportFile() {
     dropzoneTitle.textContent = file ? file.name : 'Drag & drop your backup here';
     dropzoneHint.textContent = problem || (file
         ? `${formatFileSize(file.size)} · click or drop another file to change`
-        : 'or click to browse · .sql or .mysql, up to 5 MB');
+        : importIdleHint);
 }
 
 function useDroppedFiles(files) {
@@ -558,3 +560,75 @@ statusForms.forEach((form) => {
         }
     });
 });
+
+// ---- polish: picture fade-in, scroll reveal, count-up ----
+const prefersReducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+// Pictures get "is-loaded" when they arrive, which ends their skeleton shimmer and fades them in.
+const markLoaded = (img) => img.classList.add('is-loaded');
+document.addEventListener('load', (event) => {
+    if (event.target instanceof HTMLImageElement) markLoaded(event.target);
+}, true);
+document.addEventListener('error', (event) => {
+    if (event.target instanceof HTMLImageElement) markLoaded(event.target);
+}, true);
+document.querySelectorAll('img').forEach((img) => {
+    if (img.complete) markLoaded(img);
+});
+
+// Elements given to revealOnScroll() rise in the first time they come into view.
+const revealObserver = 'IntersectionObserver' in window && !prefersReducedMotion
+    ? new IntersectionObserver((entries) => {
+        entries.forEach((entry) => {
+            if (entry.isIntersecting) {
+                entry.target.classList.add('is-revealed');
+                revealObserver.unobserve(entry.target);
+            }
+        });
+    }, { rootMargin: '0px 0px -6% 0px', threshold: 0.06 })
+    : null;
+window.revealOnScroll = (elements) => {
+    elements.forEach((element) => {
+        if (!revealObserver) return;
+        element.classList.add('reveal');
+        revealObserver.observe(element);
+    });
+};
+
+// The officer totals count up from zero when the page opens.
+if (!prefersReducedMotion) {
+    document.querySelectorAll('.stat-card strong').forEach((counter) => {
+        const target = Number(counter.textContent.trim());
+        if (!Number.isFinite(target) || target <= 0) return;
+        const started = performance.now();
+        const duration = 900;
+        counter.textContent = '0';
+        const tick = (now) => {
+            const progress = Math.min(1, (now - started) / duration);
+            const eased = 1 - (1 - progress) ** 4;
+            counter.textContent = String(Math.round(target * eased));
+            if (progress < 1) requestAnimationFrame(tick);
+        };
+        requestAnimationFrame(tick);
+    });
+}
+
+// Segmented tabs (e.g. Timeline / Horizontal / Gallery / Calendar) get a highlight that slides to the active tab.
+window.syncSegmented = (group, instant = false) => {
+    let indicator = group.querySelector('.segmented-indicator');
+    if (!indicator) {
+        indicator = document.createElement('span');
+        indicator.className = 'segmented-indicator';
+        indicator.setAttribute('aria-hidden', 'true');
+        group.prepend(indicator);
+        group.classList.add('has-indicator');
+        instant = true;
+        window.addEventListener('resize', () => window.syncSegmented(group, true));
+    }
+    const active = group.querySelector('.is-active');
+    if (!active) return;
+    group.classList.toggle('is-instant', instant);
+    indicator.style.width = `${active.offsetWidth}px`;
+    indicator.style.transform = `translateX(${active.offsetLeft}px)`;
+    if (instant) requestAnimationFrame(() => group.classList.remove('is-instant'));
+};

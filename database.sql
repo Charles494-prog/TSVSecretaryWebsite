@@ -15,6 +15,7 @@ CREATE TABLE IF NOT EXISTS officers (
   ndi_signing_text VARCHAR(50) DEFAULT NULL,
   is_active TINYINT(1) NOT NULL DEFAULT 1,
   birthday DATE DEFAULT NULL,
+  wedding_anniversary DATE DEFAULT NULL,
   contact_telegram VARCHAR(50) DEFAULT NULL,
   PRIMARY KEY (id),
   UNIQUE KEY uq_officers_masterlist_number (masterlist_number)
@@ -29,7 +30,7 @@ CREATE TABLE IF NOT EXISTS suguan_weeks (
 
 CREATE TABLE IF NOT EXISTS app_settings (
   setting_key VARCHAR(64) NOT NULL,
-  setting_value VARCHAR(150) NOT NULL DEFAULT '',
+  setting_value VARCHAR(5000) NOT NULL DEFAULT '',
   PRIMARY KEY (setting_key)
 );
 
@@ -55,4 +56,42 @@ INSERT IGNORE INTO app_settings (setting_key, setting_value) VALUES
   ('print_form_directory_report', '0'),
   ('print_form_monthly_attendance', '0'),
   ('weekly_meeting_datetime', ''),
-  ('weekly_meeting_venue', '');
+  ('weekly_meeting_venue', ''),
+  ('monthly_recruits', '[]');
+
+CREATE TABLE IF NOT EXISTS memory_posts (
+  id INT UNSIGNED NOT NULL AUTO_INCREMENT,
+  taken_on DATE NOT NULL,
+  caption VARCHAR(2000) NOT NULL DEFAULT '',
+  created_at DATETIME NOT NULL,
+  updated_at DATETIME NOT NULL,
+  PRIMARY KEY (id),
+  KEY idx_memory_posts_taken_on (taken_on)
+) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
+
+CREATE TABLE IF NOT EXISTS memory_photos (
+  id INT UNSIGNED NOT NULL AUTO_INCREMENT,
+  post_id INT UNSIGNED NOT NULL,
+  position SMALLINT UNSIGNED NOT NULL DEFAULT 0,
+  kind VARCHAR(5) NOT NULL DEFAULT 'photo',
+  checksum CHAR(40) NOT NULL,
+  mime VARCHAR(20) NOT NULL,
+  width SMALLINT UNSIGNED NOT NULL,
+  height SMALLINT UNSIGNED NOT NULL,
+  duration_ms INT UNSIGNED NOT NULL DEFAULT 0,
+  size_bytes BIGINT UNSIGNED NOT NULL DEFAULT 0,
+  complete TINYINT(1) NOT NULL DEFAULT 1,
+  uploaded_at DATETIME DEFAULT NULL,
+  photo LONGTEXT NOT NULL,
+  thumb MEDIUMTEXT NOT NULL,
+  PRIMARY KEY (id),
+  KEY idx_memory_photos_post (post_id, position),
+  KEY idx_memory_photos_checksum (checksum)
+) CHARACTER SET ascii COLLATE ascii_bin;
+
+CREATE TABLE IF NOT EXISTS memory_video_chunks (
+  media_id INT UNSIGNED NOT NULL,
+  seq INT UNSIGNED NOT NULL,
+  data MEDIUMTEXT NOT NULL,
+  PRIMARY KEY (media_id, seq)
+) CHARACTER SET ascii COLLATE ascii_bin;

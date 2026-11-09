@@ -1,17 +1,18 @@
-@echo off
+    @echo off
 setlocal DisableDelayedExpansion
 title TSV Secretary
 rem One file that installs and opens TSV Secretary. The PowerShell part below the marker line does the work;
 rem its path reaches PowerShell through an environment variable, never pasted into its code.
+rem "& exit /b" sits on the same line so cmd never reads this file again after an update replaces it.
 set "TSV_SELF=%~f0"
-powershell -NoProfile -ExecutionPolicy Bypass -Command "$f = $env:TSV_SELF; $m = [string][char]10 + '#' + '!PS!#'; $s = [IO.File]::ReadAllText($f, [Text.Encoding]::UTF8); $i = $s.IndexOf($m); if ($i -lt 0 -or $s.IndexOf($m, $i + 1) -ge 0) { Write-Host 'TSV Secretary launcher: this file is damaged (start marker missing or repeated).' -ForegroundColor Red; Read-Host 'Press Enter to close'; exit 2 }; . ([ScriptBlock]::Create($s.Substring($i + 1)))"
-exit /b
+powershell -NoProfile -ExecutionPolicy Bypass -Command "$f = $env:TSV_SELF; $m = [string][char]10 + '#' + '!PS!#'; $s = [IO.File]::ReadAllText($f, [Text.Encoding]::UTF8); $i = $s.IndexOf($m); if ($i -lt 0 -or $s.IndexOf($m, $i + 1) -ge 0) { Write-Host 'TSV Secretary launcher: this file is damaged (start marker missing or repeated).' -ForegroundColor Red; Read-Host 'Press Enter to close'; exit 2 }; . ([ScriptBlock]::Create($s.Substring($i + 1)))" & exit /b
 #!PS!#
 $ErrorActionPreference = 'SilentlyContinue'
 try { [Console]::OutputEncoding = [Text.Encoding]::UTF8 } catch {}
 
 # ============================== CONFIG ==============================
-$DriveLink = 'https://drive.google.com/file/d/15N-DX6m7uos1uXR7-P3rgTrNu-2rHJdE/view?usp=sharing'   # the site's zip on Google Drive ("Anyone with the link")
+$DriveLink = 'https://drive.google.com/file/d/1fedHSeNTF-Nhp-a6FJWtn-5DGI1hR2pi/view?usp=sharing'   # the site's zip on Google Drive ("Anyone with the link")
+# To publish an update, replace the zip on Drive with "Manage versions > Upload new version" so this link stays the same.
 $Xampp     = 'C:\xampp'
 $App       = Join-Path $Xampp 'htdocs\tsv_secretary_website'
 $Site      = 'http://localhost/tsv_secretary_website/'
@@ -19,9 +20,11 @@ $XamppUrl  = 'https://sourceforge.net/projects/xampp/files/XAMPP%20Windows/8.2.1
 $Work      = Join-Path $env:TEMP 'tsv_install'
 $MySQLPort = 3306
 $WebPort   = 80
+$XamppSize = 680MB   # space a full XAMPP 8.2.12 install takes; used for the install percentage
 # ====================================================================
 
 $Self = $env:TSV_SELF
+$Stamp = Join-Path $App '.tsv-package'   # fingerprint (SHA-256) of the Drive zip that is installed
 $W = 74
 $Logs = Join-Path $Work 'logs'
 
@@ -176,6 +179,20 @@ function Hidden($file, $argList, $log = $null, $dir = $null, $stdin = $null) {
 }
 function Size-Mb($b) { '{0:N1}' -f ($b / 1MB) }
 
+# A click in the window starts QuickEdit selection ("Select TSV Secretary"), which freezes every screen update
+# until a key is pressed. Switch it off for this window (ENABLE_QUICK_EDIT_MODE off, ENABLE_EXTENDED_FLAGS on).
+function Disable-QuickEdit {
+    try {
+        Add-Type -Namespace Tsv -Name Con -MemberDefinition '[DllImport("kernel32.dll")] public static extern IntPtr GetStdHandle(int n); [DllImport("kernel32.dll")] public static extern bool GetConsoleMode(IntPtr h, out uint m); [DllImport("kernel32.dll")] public static extern bool SetConsoleMode(IntPtr h, uint m);'
+        $h = [Tsv.Con]::GetStdHandle(-10)
+        $m = [uint32]0
+        if ([Tsv.Con]::GetConsoleMode($h, [ref]$m)) {
+            if (($m -band 0x40) -ne 0) { $m = [uint32]($m - 0x40) }
+            [void][Tsv.Con]::SetConsoleMode($h, [uint32]($m -bor 0x80))
+        }
+    } catch {}
+}
+
 # downloads a file with a live percentage in the step detail (e.g. "45%  70.1 / 150.3 MB")
 function Download($url, $out, $step) {
     [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
@@ -207,6 +224,56 @@ function Get-DriveId {
     if ($DriveLink -match '/d/([\w-]+)') { return $Matches[1] }
     if ($DriveLink -match 'id=([\w-]+)') { return $Matches[1] }
     ''
+}
+
+# downloads the site zip from Drive; returns its path, or $null with the reason in $script:PkgError
+function Get-Package($step) {
+    $script:PkgError = $null
+    $id = Get-DriveId
+    if (-not $id) { $script:PkgError = 'DriveLink is not a Google Drive file link'; return $null }
+    $zip = Join-Path $Work 'app.zip'
+    try { $script:PkgSize = Download "https://drive.usercontent.google.com/download?id=$id&export=download&confirm=t" $zip $step }
+    catch { $script:PkgError = 'no internet connection'; return $null }
+    $b = [IO.File]::ReadAllBytes($zip)
+    if ($b.Length -lt 4 -or $b[0] -ne 0x50 -or $b[1] -ne 0x4B) { $script:PkgError = 'Drive sent no zip - share it as "Anyone with the link"'; return $null }
+    $zip
+}
+# unpacks app.zip; returns the folder that holds index.php (the zip may hold the files directly or inside one folder)
+function Expand-Package {
+    $dest = Join-Path $Work 'app'
+    Remove-Item $dest -Recurse -Force -ErrorAction SilentlyContinue
+    $p = Hidden 'powershell.exe' ('-NoProfile -Command "Expand-Archive -LiteralPath ''' + (Join-Path $Work 'app.zip') + ''' -DestinationPath ''' + $dest + ''' -Force"')
+    [void](Wait-Proc $p 300)
+    if (Test-Path (Join-Path $dest 'index.php')) { return $dest }
+    (Get-ChildItem $dest -Directory | Where-Object { Test-Path (Join-Path $_.FullName 'index.php') } | Select-Object -First 1).FullName
+}
+# copies the site into htdocs; an existing db.php is kept so a changed MySQL password survives updates
+function Copy-Package($src) {
+    $skip = ''
+    if (Test-Path (Join-Path $App 'db.php')) { $skip = ' /XF db.php' }
+    $p = Hidden 'robocopy.exe' ('"' + $src + '" "' + $App + '" /E /XD .git' + $skip + ' /NFL /NDL /NJH /NJS /NP') (Join-Path $Logs 'robocopy.log')
+    [void](Wait-Proc $p 300)
+    ($p.ExitCode -lt 8 -and (Test-Path (Join-Path $App 'index.php')))
+}
+# Every launch compares the Drive zip with the installed one and copies the files over when it changed.
+# The officer records live in MySQL, so they are never touched by an update.
+function Update-App {
+    if (Test-Path (Join-Path $App '.git')) { return (Res 'ok' 'developer copy - not auto-updated') }
+    $zip = Get-Package $script:Cur
+    if (-not $zip) { return (Res 'warn' ($script:PkgError + ' - using the installed version')) }
+    $hash = (Get-FileHash -LiteralPath $zip -Algorithm SHA256).Hash
+    if ((Get-Content -LiteralPath $Stamp -ErrorAction SilentlyContinue | Select-Object -First 1) -eq $hash) {
+        Remove-Item $zip -Force -ErrorAction SilentlyContinue
+        return (Res 'ok' 'already up to date')
+    }
+    $script:Frac = 0.5; $script:Cur.Detail = 'unpacking the update...'; Pump -NoSleep
+    $src = Expand-Package
+    if (-not $src) { return (Res 'warn' 'the Drive zip has no site in it - kept the installed version') }
+    $script:Frac = 0.8; $script:Cur.Detail = 'copying the new files...'; Pump -NoSleep
+    if (-not (Copy-Package $src)) { $script:FailLog = Join-Path $Logs 'robocopy.log'; return (Res 'warn' 'could not copy the update - kept the installed version') }
+    Set-Content -LiteralPath $Stamp -Value $hash -Encoding ASCII
+    Remove-Item (Join-Path $Work 'app'), $zip -Recurse -Force -ErrorAction SilentlyContinue
+    Res 'ok' 'updated to the newest version'
 }
 
 # ------------------------------- steps -------------------------------
@@ -243,9 +310,29 @@ function Make-Shortcut {
     if (Test-Path $path) { Res 'ok' 'TSV Secretary.lnk added' } else { Res 'warn' 'could not create the shortcut' }
 }
 
+# XAMPP counts as installed only when Apache, PHP and MySQL are all there (a closed launcher can leave a half-done install)
+function Test-XamppReady {
+    foreach ($part in 'apache\bin\httpd.exe', 'php\php.exe', 'mysql\bin\mysqld.exe', 'mysql\bin\mysql.exe') {
+        if (-not (Test-Path (Join-Path $Xampp $part))) { return $false }
+    }
+    $true
+}
+# the XAMPP installer keeps running after the launcher window is closed; this finds it
+function Get-XamppInstaller { Get-Process -Name 'xampp-installer', 'xampp-windows-*' -ErrorAction SilentlyContinue | Select-Object -First 1 }
+
 function Install-Steps {
     $l = @()
-    if (-not (Test-Path (Join-Path $Xampp 'mysql\bin\mysqld.exe'))) {
+    if (Get-XamppInstaller) {
+        $l += (Step 'Finishing XAMPP install' {
+            $t = Get-Date
+            while ((Get-XamppInstaller) -and ((Get-Date) - $t).TotalMinutes -lt 30) {
+                $script:Cur.Detail = 'installer still running ' + ((Get-Date) - $t).ToString('mm\:ss')
+                Pump
+            }
+            if (Test-XamppReady) { return (Res 'ok' "installed to $Xampp") }
+            Res 'fail' 'XAMPP is incomplete - run this file again to reinstall it'
+        })
+    } elseif (-not (Test-XamppReady)) {
         $l += (Step 'Retrieving XAMPP' {
             $s = $script:Cur
             $n = Download $XamppUrl (Join-Path $Work 'xampp-installer.exe') $s
@@ -253,40 +340,39 @@ function Install-Steps {
             Res 'ok' ('XAMPP 8.2.12 ' + (Size-Mb $n) + ' MB')
         })
         $l += (Step 'Installing XAMPP' {
-            $script:Cur.Detail = 'this takes a few minutes...'
+            $script:Cur.Detail = 'starting the installer...'
+            # the silent installer reports no progress: the space it has used on the drive shows how far it is
+            $root = [IO.Path]::GetPathRoot($Xampp)
+            $free0 = (New-Object IO.DriveInfo $root).AvailableFreeSpace
             $p = Hidden (Join-Path $Work 'xampp-installer.exe') ('--mode unattended --prefix "' + $Xampp + '"')
-            [void](Wait-Proc $p 1800)
-            if (Test-Path (Join-Path $Xampp 'mysql\bin\mysqld.exe')) { return (Res 'ok' "installed to $Xampp") }
+            $t = Get-Date
+            while (-not $p.HasExited -and ((Get-Date) - $t).TotalMinutes -lt 30) {
+                $used = [math]::Max(0, $free0 - (New-Object IO.DriveInfo $root).AvailableFreeSpace)
+                $script:Frac = [math]::Min(0.99, $used / $XamppSize)
+                $script:Cur.Detail = ('{0,3}%  {1} MB unpacked' -f [int]($script:Frac * 100), (Size-Mb $used))
+                Pump
+            }
+            if (-not $p.HasExited) { try { $p.Kill() } catch {} }
+            if (Test-XamppReady) { return (Res 'ok' "installed to $Xampp") }
             # silent mode did not work: open the normal installer, then Retry continues from here
             Start-Process (Join-Path $Work 'xampp-installer.exe')
             Res 'fail' 'finish the XAMPP installer (keep C:\xampp), then Retry'
         })
     }
     $l += (Step 'Retrieving TSV Secretary' {
-        $id = Get-DriveId
-        if (-not $id) { return (Res 'fail' 'DriveLink is not a Google Drive file link') }
-        $zip = Join-Path $Work 'app.zip'
-        $n = Download "https://drive.usercontent.google.com/download?id=$id&export=download&confirm=t" $zip $script:Cur
-        $b = [IO.File]::ReadAllBytes($zip)
-        if ($b.Length -lt 4 -or $b[0] -ne 0x50 -or $b[1] -ne 0x4B) { return (Res 'fail' 'Drive sent no zip - share it as "Anyone with the link"') }
-        Res 'ok' ('site package ' + (Size-Mb $n) + ' MB')
+        $zip = Get-Package $script:Cur
+        if (-not $zip) { return (Res 'fail' $script:PkgError) }
+        $script:PkgHash = (Get-FileHash -LiteralPath $zip -Algorithm SHA256).Hash
+        Res 'ok' ('site package ' + (Size-Mb $script:PkgSize) + ' MB')
     })
     $l += (Step 'Unpacking files' {
-        $dest = Join-Path $Work 'app'
-        Remove-Item $dest -Recurse -Force -ErrorAction SilentlyContinue
-        $p = Hidden 'powershell.exe' ('-NoProfile -Command "Expand-Archive -LiteralPath ''' + (Join-Path $Work 'app.zip') + ''' -DestinationPath ''' + $dest + ''' -Force"')
-        [void](Wait-Proc $p 300)
-        # the zip may hold the files directly or inside one folder
-        $script:Source = $null
-        if (Test-Path (Join-Path $dest 'index.php')) { $script:Source = $dest }
-        else { $script:Source = (Get-ChildItem $dest -Directory | Where-Object { Test-Path (Join-Path $_.FullName 'index.php') } | Select-Object -First 1).FullName }
+        $script:Source = Expand-Package
         if (-not $script:Source) { return (Res 'fail' 'the zip does not contain the TSV Secretary site') }
         Res 'ok' ([string](@(Get-ChildItem $script:Source -Recurse -File | Where-Object { $_.FullName -notmatch '\\\.git\\' }).Count) + ' files')
     })
     $l += (Step 'Copying to htdocs' {
-        $p = Hidden 'robocopy.exe' ('"' + $script:Source + '" "' + $App + '" /E /XD .git /NFL /NDL /NJH /NJS /NP') (Join-Path $Logs 'robocopy.log')
-        [void](Wait-Proc $p 300)
-        if ($p.ExitCode -ge 8 -or -not (Test-Path (Join-Path $App 'index.php'))) { $script:FailLog = Join-Path $Logs 'robocopy.log'; return (Res 'fail' 'could not copy the files') }
+        if (-not (Copy-Package $script:Source)) { $script:FailLog = Join-Path $Logs 'robocopy.log'; return (Res 'fail' 'could not copy the files') }
+        Set-Content -LiteralPath $Stamp -Value $script:PkgHash -Encoding ASCII
         Res 'ok' $App
     })
     $l += (Step 'Starting MySQL' { Start-MySQL })
@@ -299,6 +385,7 @@ function Install-Steps {
 function Launch-Steps {
     @(
         (Step 'Locating TSV Secretary' { Res 'ok' $App }),
+        (Step 'Checking for updates' { Update-App }),
         (Step 'Starting MySQL' { Start-MySQL }),
         (Step 'Starting Apache' { Start-Apache }),
         (Step 'Checking database' { Ensure-Database 'tsv_secretary ready' }),
@@ -429,6 +516,7 @@ try {
     $ui = $Host.UI.RawUI
     $ui.WindowTitle = 'TSV Secretary'
     $ui.BackgroundColor = 'Black'
+    Disable-QuickEdit
     try { $ui.WindowSize = New-Object Management.Automation.Host.Size(80, 34) } catch {}
     try { $ui.BufferSize = New-Object Management.Automation.Host.Size(80, 34) } catch {}
     try { $ui.WindowSize = New-Object Management.Automation.Host.Size(80, 34) } catch {}
@@ -436,7 +524,7 @@ try {
 
     $installed = Test-Path (Join-Path $App 'index.php')
     # installing XAMPP into C:\ needs Administrator: ask once, the elevated copy carries on
-    if (-not (Test-Path (Join-Path $Xampp 'mysql\bin\mysqld.exe')) -and -not (Test-Admin)) {
+    if (-not (Test-XamppReady) -and -not (Get-XamppInstaller) -and -not (Test-Admin)) {
         Wipe
         Frame 'Yellow' 'PERMISSION' {
             Row

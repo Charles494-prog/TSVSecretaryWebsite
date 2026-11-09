@@ -552,7 +552,39 @@ function generateChecklistDocx(array $services, array $settings, string $templat
     );
 }
 
-// $recruits holds [name, birthday (Y-m-d or '')] rows for the Recruits table.
+// Fills an empty template cell line with the run formatting of its paragraph mark (the template's
+// 9pt Bookman Old Style), so the text matches the printed column instead of Word's default font.
+function setDocxCellTextLines(DOMXPath $xpath, DOMElement $cell, array $lines): void
+{
+    $paragraphs = iterator_to_array($xpath->query('./w:p', $cell));
+    $template = $paragraphs[0]->cloneNode(true);
+    foreach ($xpath->query('./w:r', $template) as $run) {
+        $template->removeChild($run);
+    }
+    foreach (array_slice($paragraphs, 1) as $extra) {
+        $cell->removeChild($extra);
+    }
+    $cell->removeChild($paragraphs[0]);
+    $markFormat = $xpath->query('./w:pPr/w:rPr', $template)->item(0);
+    foreach ($lines ?: [''] as $line) {
+        $paragraph = $template->cloneNode(true);
+        if ($line !== '') {
+            $document = $cell->ownerDocument;
+            $run = $document->createElementNS(WORD_NAMESPACE, 'w:r');
+            if ($markFormat) {
+                $run->appendChild($markFormat->cloneNode(true));
+            }
+            $text = $document->createElementNS(WORD_NAMESPACE, 'w:t');
+            $text->setAttributeNS('http://www.w3.org/XML/1998/namespace', 'xml:space', 'preserve');
+            $text->appendChild($document->createTextNode($line));
+            $run->appendChild($text);
+            $paragraph->appendChild($run);
+        }
+        $cell->appendChild($paragraph);
+    }
+}
+
+// $recruits holds [name, birthday, wedding date (Y-m-d or '')] rows for the Recruits table.
 function generateMonthlyAttendanceDocx(array $officers, array $recruits, array $settings, string $meetingDate, string $templatePath): string
 {
     return generateDocxFromTemplate(
@@ -579,19 +611,28 @@ function generateMonthlyAttendanceDocx(array $officers, array $recruits, array $
 
             $table = docxTableAt($xpath, 3);
             $rows = docxRows($xpath, $table);
-            $fill = static function (DOMElement $row, string $name, ?string $birthday) use ($xpath): void {
-                setWordText($xpath, docxCell($xpath, $row, 0), $name);
-                setWordText(
-                    $xpath,
-                    docxCell($xpath, $row, 3),
-                    $birthday ? (new DateTimeImmutable($birthday))->format('F j') : ''
-                );
+            // Birthday as "July 08, 2003"; a wedding anniversary goes on its own line below it.
+            $fill = static function (DOMElement $row, string $name, ?string $birthday, ?string $wedding = null) use ($xpath): void {
+                setDocxCellTextLines($xpath, docxCell($xpath, $row, 0), [$name]);
+                $dates = [];
+                if ($birthday) {
+                    $dates[] = (new DateTimeImmutable($birthday))->format('F d, Y');
+                }
+                if ($wedding) {
+                    $dates[] = 'Wedding: ' . (new DateTimeImmutable($wedding))->format('F d, Y');
+                }
+                setDocxCellTextLines($xpath, docxCell($xpath, $row, 3), $dates);
             };
-            $fill($rows[1], (string) ($settings['pd_tagasubaybay'] ?? ''), null);
+            $fill(
+                $rows[1],
+                (string) ($settings['pd_tagasubaybay'] ?? ''),
+                ($settings['pd_tagasubaybay_birthday'] ?? '') ?: null,
+                ($settings['pd_tagasubaybay_wedding'] ?? '') ?: null
+            );
             foreach (['Locale TSV Lead' => 2, 'Locale TSV Assistant Lead' => 3, 'Locale TSV Secretary' => 4] as $role => $rowIndex) {
                 $officer = $groups[$role][0] ?? null;
                 if ($officer) {
-                    $fill($rows[$rowIndex], (string) $officer['name'], $officer['birthday']);
+                    $fill($rows[$rowIndex], (string) $officer['name'], $officer['birthday'], $officer['wedding_anniversary'] ?? null);
                 }
             }
             $officerRows = array_slice($rows, 5);
@@ -601,7 +642,7 @@ function generateMonthlyAttendanceDocx(array $officers, array $recruits, array $
                 $officerRows[] = $copy;
             }
             foreach ($groups['Locale TSV Officer'] as $index => $officer) {
-                $fill($officerRows[$index], (string) $officer['name'], $officer['birthday']);
+                $fill($officerRows[$index], (string) $officer['name'], $officer['birthday'], $officer['wedding_anniversary'] ?? null);
             }
             // Pre-printed "TSV Officer" rows without an officer are removed; the Recruits table below stays for write-ins.
             foreach (array_slice($officerRows, count($groups['Locale TSV Officer'])) as $unusedRow) {
@@ -617,8 +658,9 @@ function generateMonthlyAttendanceDocx(array $officers, array $recruits, array $
                     $recruitTable->appendChild($copy);
                     $recruitRows[] = $copy;
                 }
-                foreach ($recruits as $index => [$name, $birthday]) {
-                    $fill($recruitRows[$index], $name, $birthday !== '' ? $birthday : null);
+                foreach ($recruits as $index => $recruit) {
+                    [$name, $birthday, $wedding] = array_pad($recruit, 3, '');
+                    $fill($recruitRows[$index], $name, $birthday !== '' ? $birthday : null, $wedding !== '' ? $wedding : null);
                 }
                 foreach (array_slice($recruitRows, count($recruits)) as $unusedRow) {
                     $unusedRow->parentNode->removeChild($unusedRow);

@@ -557,6 +557,38 @@ function addAgendaTopicSections(DOMXPath $xpath, array &$files, int $topicCount)
     $files['word/numbering.xml'] = str_replace('</w:numbering>', $newLists . '</w:numbering>', $numbering);
 }
 
+/**
+ * Turns a recurring meeting text such as "Sunday, 3:30 PM" into
+ * "November 08, 2026, Sunday, 3:30 PM" using the upcoming occurrence of that
+ * weekday (today if it matches). Text that already holds a date is unchanged.
+ */
+function withUpcomingMeetingDate(string $meetingDateTime, ?DateTimeImmutable $today = null): string
+{
+    $months = 'jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec|ene|abr|ago|set|okt|dis';
+    if (preg_match('/\d{4}|\d{1,2}\/\d{1,2}|\b(' . $months . ')[a-z]*\b/i', $meetingDateTime)) {
+        return $meetingDateTime;
+    }
+
+    $weekdays = [
+        'sunday' => 'Sunday', 'linggo' => 'Sunday',
+        'monday' => 'Monday', 'lunes' => 'Monday',
+        'tuesday' => 'Tuesday', 'martes' => 'Tuesday',
+        'wednesday' => 'Wednesday', 'miyerkules' => 'Wednesday', 'miyerkoles' => 'Wednesday',
+        'thursday' => 'Thursday', 'huwebes' => 'Thursday',
+        'friday' => 'Friday', 'biyernes' => 'Friday',
+        'saturday' => 'Saturday', 'sabado' => 'Saturday',
+    ];
+    if (!preg_match('/\b(' . implode('|', array_keys($weekdays)) . ')\b/i', $meetingDateTime, $match)) {
+        return $meetingDateTime;
+    }
+
+    $today ??= new DateTimeImmutable('today', new DateTimeZone('Asia/Manila'));
+    $weekday = $weekdays[strtolower($match[1])];
+    $date = $today->format('l') === $weekday ? $today : $today->modify('next ' . $weekday);
+
+    return $date->format('F d, Y') . ', ' . $meetingDateTime;
+}
+
 function generateWeeklyAgendaDocx(
     string $meetingDateTime,
     string $venue,
@@ -590,7 +622,7 @@ function generateWeeklyAgendaDocx(
             };
 
             setWordText($xpath, $find('Lokal ng'), 'Lokal ng ' . mb_strtoupper((string) $settings['locale_name']));
-            replaceWordText($xpath, $find('Petsa, Araw, Oras'), 'Petsa, Araw, Oras ng Pulong', 'Petsa, Araw, Oras ng Pulong: ' . $meetingDateTime);
+            replaceWordText($xpath, $find('Petsa, Araw, Oras'), 'Petsa, Araw, Oras ng Pulong', 'Petsa, Araw, Oras ng Pulong: ' . withUpcomingMeetingDate($meetingDateTime));
             replaceWordText($xpath, $find('Dako ng Pulong'), 'Dako ng Pulong', 'Dako ng Pulong: ' . $venue);
             replaceWordText($xpath, $find('Unang Panalangin:'), 'Unang Panalangin:', 'Unang Panalangin: ' . $firstPrayer);
             replaceWordText($xpath, $find('Huling Panalangin:'), 'Huling Panalangin:', 'Huling Panalangin: ' . $lastPrayer);

@@ -12,13 +12,35 @@ const OFFICER_COLUMNS = [
     'ndi_signing_text',
     'is_active',
     'birthday',
+    'wedding_anniversary',
     'contact_telegram',
 ];
 const LEGACY_OFFICER_ROLES = [
     'TSV Officers' => 'Locale TSV Officer',
     'Locale TSV Officer ng Officers' => 'Locale TSV Officer',
 ];
-const IMPORT_MAX_BYTES = 5 * 1024 * 1024;
+// Backups now carry photos, so the limit is whatever PHP accepts (raised to 512 MB in .htaccess).
+function iniBytes(string $key): int
+{
+    $value = trim((string) ini_get($key));
+    $number = (int) $value;
+    return match (strtolower(substr($value, -1))) {
+        'g' => $number * 1024 ** 3,
+        'm' => $number * 1024 ** 2,
+        'k' => $number * 1024,
+        default => $number,
+    };
+}
+
+function importMaxBytes(): int
+{
+    return min(iniBytes('upload_max_filesize'), iniBytes('post_max_size'));
+}
+
+function formatBytes(int $bytes): string
+{
+    return $bytes >= 1024 ** 3 ? round($bytes / 1024 ** 3, 1) . ' GB' : round($bytes / 1024 ** 2) . ' MB';
+}
 
 function officersOrderedForExport(PDO $pdo): array
 {
@@ -44,8 +66,8 @@ function xlsxColumn(int $index): string
 
 function officersXlsx(array $officers): string
 {
-    $headers = ['Blg.', 'Name', 'Tungkulin', 'Oath-taking', 'NDA signing', 'Birthday', 'Contact (Active) Telegram #', 'Status'];
-    $widths = [8, 32, 28, 20, 20, 20, 28, 12];
+    $headers = ['Blg.', 'Name', 'Tungkulin', 'Oath-taking', 'NDA signing', 'Birthday', 'Wedding anniversary', 'Contact (Active) Telegram #', 'Status'];
+    $widths = [8, 32, 28, 20, 20, 20, 22, 28, 12];
     $rows = [$headers];
     foreach ($officers as $officer) {
         $rows[] = [
@@ -55,6 +77,7 @@ function officersXlsx(array $officers): string
             masterlistDateText($officer, 'oath_taking_text', 'oath_taking_date'),
             masterlistDateText($officer, 'ndi_signing_text', 'ndi_signing_date'),
             $officer['birthday'] ? (new DateTimeImmutable($officer['birthday']))->format('F j, Y') : '',
+            !empty($officer['wedding_anniversary']) ? (new DateTimeImmutable($officer['wedding_anniversary']))->format('F j, Y') : '',
             (string) ($officer['contact_telegram'] ?? ''),
             (int) $officer['is_active'] === 1 ? 'Active' : 'Inactive',
         ];
@@ -122,12 +145,44 @@ function officersXlsx(array $officers): string
     ]);
 }
 
-// A backup that phpMyAdmin can also import: the officers table definition plus every record.
+// A backup that phpMyAdmin can also import: the officer records plus the TSV Memories posts and photos.
+// It is written piece by piece through $write, since the photos can make it large.
+function writeBackupSql(PDO $pdo, callable $write): void
+{
+    $write("-- TSV officer records and TSV Memories\n-- Exported " . date('Y-m-d H:i') . "\n\n" . officersSqlDump($pdo));
+    $write(settingsSqlDump($pdo));
+    writeMemoriesSql($pdo, $write);
+}
+
+// The signatories, locale and form-generator settings plus the planned Suguan weeks, so the TSV Secretary
+// desktop app can restore them. This site's own Import still reads only the officers and memories.
+function settingsSqlDump(PDO $pdo): string
+{
+    $pairs = static fn(array $rows): string => implode(",\n", array_map(
+        static fn(array $row): string => '(' . $pdo->quote((string) $row[0]) . ', ' . $pdo->quote((string) $row[1]) . ')',
+        $rows
+    ));
+    $sql = "\nCREATE TABLE IF NOT EXISTS `app_settings` (\n  `setting_key` varchar(64) NOT NULL,\n  `setting_value` varchar(5000) NOT NULL DEFAULT '',\n  PRIMARY KEY (`setting_key`)\n) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;\n";
+    $settings = $pdo->query("SELECT setting_key, setting_value FROM app_settings WHERE setting_key <> 'schema_version' ORDER BY setting_key")->fetchAll(PDO::FETCH_NUM);
+    if ($settings) {
+        $sql .= "\nINSERT INTO `app_settings` (`setting_key`, `setting_value`) VALUES\n" . $pairs($settings)
+            . "\nON DUPLICATE KEY UPDATE `setting_value` = VALUES(`setting_value`);\n";
+    }
+    $sql .= "\nCREATE TABLE IF NOT EXISTS `suguan_weeks` (\n  `week_start` date NOT NULL,\n  `services` longtext NOT NULL,\n  `updated_at` timestamp NOT NULL DEFAULT current_timestamp() ON UPDATE current_timestamp(),\n  PRIMARY KEY (`week_start`)\n) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;\n";
+    $weeks = $pdo->query('SELECT week_start, services FROM suguan_weeks ORDER BY week_start')->fetchAll(PDO::FETCH_NUM);
+    if ($weeks) {
+        $sql .= "\nINSERT INTO `suguan_weeks` (`week_start`, `services`) VALUES\n" . $pairs($weeks)
+            . "\nON DUPLICATE KEY UPDATE `services` = VALUES(`services`);\n";
+    }
+
+    return $sql;
+}
+
 function officersSqlDump(PDO $pdo): string
 {
     $create = $pdo->query('SHOW CREATE TABLE officers')->fetch(PDO::FETCH_NUM)[1];
     $create = preg_replace('/^CREATE TABLE/', 'CREATE TABLE IF NOT EXISTS', $create);
-    $sql = "-- TSV officer records\n-- Exported " . date('Y-m-d H:i') . "\n\n" . $create . ";\n";
+    $sql = $create . ";\n";
 
     $officers = $pdo->query('SELECT * FROM officers ORDER BY id')->fetchAll();
     if ($officers) {
@@ -154,6 +209,13 @@ function readSqlString(string $sql, int &$position): string
     $length = strlen($sql);
     $escapes = ['0' => "\0", 'b' => "\x08", 'n' => "\n", 'r' => "\r", 't' => "\t", 'Z' => "\x1A"];
     while ($position < $length) {
+        // Copy the plain run up to the next quote or backslash in one step (photos are long base64 runs).
+        $run = strcspn($sql, $quote . '\\', $position);
+        $value .= substr($sql, $position, $run);
+        $position += $run;
+        if ($position >= $length) {
+            break;
+        }
         $character = $sql[$position++];
         if ($character === '\\' && $position < $length) {
             $next = $sql[$position++];
@@ -165,8 +227,6 @@ function readSqlString(string $sql, int &$position): string
             } else {
                 return $value;
             }
-        } else {
-            $value .= $character;
         }
     }
     throw new InvalidArgumentException('The SQL file has an unterminated text value.');
@@ -289,6 +349,7 @@ function normalizeImportedOfficers(array $rows, array $allowedRoles): array
             'ndi_signing_text' => importText($row['ndi_signing_text'] ?? null, 50),
             'is_active' => (string) ($row['is_active'] ?? '1') === '0' ? 0 : 1,
             'birthday' => importDate($row['birthday'] ?? null),
+            'wedding_anniversary' => importDate($row['wedding_anniversary'] ?? null),
             'contact_telegram' => importText($row['contact_telegram'] ?? null, 50),
         ];
     }

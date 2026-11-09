@@ -1,0 +1,15 @@
+# TSV Memories photos travel inside the SQL backups, so imports can be much larger than PHP's defaults allow.
+<IfModule php_module>
+    php_value upload_max_filesize 512M
+    php_value post_max_size 520M
+    php_value memory_limit 1536M
+    php_value max_execution_time 300
+</IfModule>
+
+# The pages load style.css?v=28, app.js?v=22 and so on; the number changes with every update, so the browser
+# can keep these files instead of asking for them again on each page load.
+<IfModule headers_module>
+    <FilesMatch "\.(css|js|woff2?)$">
+        Header set Cache-Control "public, max-age=31536000, immutable"
+    </FilesMatch>
+</IfModule>

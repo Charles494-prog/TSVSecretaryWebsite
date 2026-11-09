@@ -38,6 +38,14 @@ PNK services can also be toggled to EWS; EWS services get a checklist page and a
 
 The Form generator can also print this week's Suguan, checklist and Resumen, the Patotoo na nadelete ang hymnfiles (covering Monday to Sunday ending on the most recent Sunday), and the monthly TSV Officers Pulong Attendance. Set the locale, district and the district supervisor under **Signatories**. Monthly reports (pulong attendance, TSV Form 3 as .xlsx, Directory Report) ask for the month; Form 3 officer counts include inactive officers and the Directory Report schedule comes from the Suguan. Overview shows this month's birthdays, **Export Excel** downloads the masterlist as an .xlsx spreadsheet, **Export SQL** downloads a backup of the officer records table, **Import** restores or adds records from a .sql/.mysql backup (after a review and confirmation step), and the moon/sun button switches between dark and light mode.
 
+Officers have an optional **Wedding anniversary** next to the birthday; both print in full ("July 08, 2003") on the monthly pulong attendance. Recruits entered for the monthly attendance (name, birthday, wedding date) are remembered for the next time until changed. The Webex display name for TSV Form 3 is set under **Signatories**. The wedding column and the longer settings column are added to an existing database automatically on the first page load.
+
+## TSV Memories
+
+**TSV Memories** in the sidebar keeps photos and videos of TSV activities like a social media feed. **New memory** takes one or more photos or videos, a caption and the activity date (left blank, it is dated the day the photos are added). Posts can be edited (caption, date, add or remove photos) or deleted from the ⋯ menu or the photo viewer. View them as a **Timeline**, a **Horizontal** timeline (oldest on the left, newest on the right; rest the mouse near either side to glide along, click a memory to zoom it open), a **Gallery** or a **Calendar** (clicking a day opens its photos), filter by year, and see **On this day** memories from earlier years.
+
+Photos are resized in the browser (up to 1600 px, about 500 KB). Videos (MP4, WebM or MOV, up to 100 MB each) are uploaded in 512 KB pieces with a progress percentage. A single video plays right in the feed; videos use a YouTube-style player (seek bar, volume, playback speed, picture-in-picture, full screen, and YouTube's keyboard shortcuts: Space/K, J/L, arrows, M, F). Videos play at the quality they were uploaded in. Both are stored in the database, so **Export SQL** backups include them and **Import** restores them; each video adds about 1.33× its size to the backup. Importing the same backup again skips photos and videos that are already there. `.htaccess` raises PHP's upload limit to 512 MB for these larger backups; keep it when copying or zipping the site.
+
 For an existing database, run `migrate_suguan.sql` and `migrate_monthly_reports.sql` once to add the Suguan table and the locale settings.
 
 To extend an existing database for the imported masterlist fields, run `migrate_masterlist_columns.sql` once in phpMyAdmin before using this version. It adds roster number, Telegram contact, and raw source text for incomplete dates without removing existing fields.
@@ -51,7 +59,7 @@ The default XAMPP database account is often `root` with no password. Set a passw
 `tsv-secretary.bat` does everything:
 
 - **Site not installed yet:** installs XAMPP 8.2.12 if missing (asking for administrator permission once), downloads the site zip from the Google Drive link in `DRIVE_LINK`, copies it to `C:\xampp\htdocs\tsv_secretary_website`, starts MySQL and Apache, creates the `tsv_secretary` database from `database.sql`, adds a **TSV Secretary** desktop shortcut, and opens the site.
-- **Site already installed:** starts MySQL and Apache in the background (if they are not running) and opens the site.
+- **Site already installed:** downloads the zip from Drive and, if it differs from the installed one, copies the new files over (officer records in MySQL and an existing `db.php` are kept; offline, it just uses the installed version; a folder with `.git` is never updated). Then it starts MySQL and Apache in the background (if they are not running) and opens the site.
 
 To prepare it: zip this folder (select all files, then **Send to > Compressed (zipped) folder**; the hidden `.git` folder is not needed), upload the zip to Google Drive shared as **Anyone with the link**, and paste the share link into `DRIVE_LINK` in `tsv-secretary.bat`. Then send only the .bat file to the new PC.
 

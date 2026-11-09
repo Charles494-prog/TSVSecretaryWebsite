@@ -2,7 +2,11 @@
 declare(strict_types=1);
 
 date_default_timezone_set('Asia/Manila');
-session_start();
+// Photos, videos and the connection check need no session. Skipping it matters: PHP locks a session for the
+// whole request, so with one, a page of thumbnails would load one at a time instead of all together.
+if (!in_array($_GET['action'] ?? '', ['ping', 'memory_photo', 'memory_video'], true)) {
+    session_start();
+}
 require __DIR__ . '/db.php';
 if (($_GET['action'] ?? '') === 'ping') {
     $connected = false;
@@ -30,6 +34,31 @@ require __DIR__ . '/docx_templates.php';
 require __DIR__ . '/suguan.php';
 require __DIR__ . '/monthly_reports.php';
 require __DIR__ . '/import_export.php';
+require __DIR__ . '/memories.php';
+
+// Brings an older database up to date so no migration file has to be run by hand. The checks run once;
+// afterwards a stored schema version skips them (one quick query instead of several on every request).
+// Raise SCHEMA_VERSION whenever the upgrade steps below change, so every database runs them once more.
+const SCHEMA_VERSION = '3';
+try {
+    $schemaVersion = $pdo->query("SELECT setting_value FROM app_settings WHERE setting_key = 'schema_version'")->fetchColumn();
+} catch (PDOException) {
+    $schemaVersion = false;
+}
+if ($schemaVersion !== SCHEMA_VERSION) try {
+    if (!$pdo->query("SHOW COLUMNS FROM officers LIKE 'wedding_anniversary'")->fetch()) {
+        $pdo->exec('ALTER TABLE officers ADD COLUMN wedding_anniversary DATE DEFAULT NULL AFTER birthday');
+    }
+    $settingColumn = $pdo->query("SHOW COLUMNS FROM app_settings LIKE 'setting_value'")->fetch();
+    if ($settingColumn && strtolower((string) $settingColumn['Type']) === 'varchar(150)') {
+        $pdo->exec("ALTER TABLE app_settings MODIFY setting_value VARCHAR(5000) NOT NULL DEFAULT ''");
+    }
+    ensureMemoryTables($pdo);
+    $pdo->prepare("INSERT INTO app_settings (setting_key, setting_value) VALUES ('schema_version', :version)
+                   ON DUPLICATE KEY UPDATE setting_value = VALUES(setting_value)")->execute(['version' => SCHEMA_VERSION]);
+} catch (PDOException $e) {
+    error_log('Schema upgrade failed: ' . $e->getMessage());
+}
 
 if (empty($_SESSION['csrf_token'])) {
     $_SESSION['csrf_token'] = bin2hex(random_bytes(32));
@@ -79,7 +108,7 @@ function displayRecordDate(?string $date, ?string $sourceText): string
     return displayDate($date);
 }
 
-function validDate(string $value, string $label, array &$errors): ?string
+function validDate(string $value, string $label, array &$errors, bool $notInFuture = false): ?string
 {
     if ($value === '') {
         return null;
@@ -90,6 +119,10 @@ function validDate(string $value, string $label, array &$errors): ?string
         $errors[] = "{$label} must be a valid date.";
         return null;
     }
+    if ($notInFuture && $value > date('Y-m-d')) {
+        $errors[] = "{$label} cannot be later than today.";
+        return null;
+    }
 
     return $value;
 }
@@ -98,7 +131,7 @@ if (($_GET['action'] ?? '') === 'suguan') {
     header('Location: index.php#generator');
     exit;
 }
-$allowedActions = ['list', 'form', 'settings', 'suguan_data', 'export_xlsx', 'export_sql', 'import_review'];
+$allowedActions = ['list', 'form', 'settings', 'suguan_data', 'export_xlsx', 'export_sql', 'import_review', 'memories', 'memories_data', 'memory_photo', 'memory_video'];
 $allowedRoles = [
     'Locale TSV Lead',
     'Locale TSV Assistant Lead',
@@ -215,7 +248,30 @@ if ($action === 'export_xlsx') {
     sendDownload('tsv-officer-masterlist.xlsx', officersXlsx(officersOrderedForExport($pdo)), XLSX_MIME);
 }
 if ($action === 'export_sql') {
-    sendDownload('tsv-officers-' . date('Y-m-d') . '.sql', officersSqlDump($pdo), 'application/sql; charset=utf-8');
+    // Streamed straight to the browser: with photos the backup can be far larger than the officer records alone.
+    $token = $_GET['download_token'] ?? '';
+    if (is_string($token) && preg_match('/^[a-z0-9]{6,32}$/', $token)) {
+        setcookie('tsv_download', $token, ['path' => '/', 'samesite' => 'Lax']);
+    }
+    set_time_limit(300);
+    header('Content-Type: application/sql; charset=utf-8');
+    header('Content-Disposition: attachment; filename="tsv-backup-' . date('Y-m-d') . '.sql"');
+    writeBackupSql($pdo, static function (string $chunk): void {
+        echo $chunk;
+    });
+    exit;
+}
+if ($action === 'memory_photo') {
+    sendMemoryPhoto($pdo, (int) ($_GET['id'] ?? 0), ($_GET['size'] ?? '') === 'thumb');
+}
+if ($action === 'memory_video') {
+    sendMemoryVideo($pdo, (int) ($_GET['id'] ?? 0));
+}
+if ($action === 'memories') {
+    clearAbandonedVideos($pdo);
+}
+if ($action === 'memories_data') {
+    sendJson(['posts' => memoriesPayload($pdo)]);
 }
 $errors = [];
 $expectsJson = str_contains(
@@ -226,6 +282,15 @@ $toast = isset($_SESSION['toast']) && is_array($_SESSION['toast']) ? $_SESSION['
 unset($_SESSION['toast']);
 $search = '';
 
+if ($_SERVER['REQUEST_METHOD'] === 'POST' && !$_POST && (int) ($_SERVER['CONTENT_LENGTH'] ?? 0) > iniBytes('post_max_size')) {
+    $tooLarge = 'That upload is larger than the server accepts (' . formatBytes(iniBytes('post_max_size')) . ').';
+    if ($expectsJson) {
+        sendJson(['success' => false, 'message' => $tooLarge], 413);
+    }
+    flash('Upload Too Large', $tooLarge, 'error');
+    header('Location: index.php');
+    exit;
+}
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     $token = $_POST['csrf_token'] ?? '';
     $sessionToken = $_SESSION['csrf_token'] ?? '';
@@ -250,21 +315,35 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             if (!is_array($upload) || ($upload['error'] ?? UPLOAD_ERR_NO_FILE) !== UPLOAD_ERR_OK) {
                 throw new InvalidArgumentException('Choose a .sql backup file to import.');
             }
-            if ($upload['size'] > IMPORT_MAX_BYTES) {
-                throw new InvalidArgumentException('The backup file is larger than 5 MB.');
-            }
+            set_time_limit(300);
             $contents = (string) file_get_contents($upload['tmp_name']);
             [$records, $skipped] = normalizeImportedOfficers(parseOfficerSqlDump($contents), $allowedRoles);
-            if (!$records) {
+            $memories = parseMemorySqlDump($contents);
+            if (!$records && !$memories['posts']) {
                 throw new InvalidArgumentException(
-                    'No officer records were found in that file.' . ($skipped ? ' ' . implode(' ', array_slice($skipped, 0, 3)) : '')
+                    'No officer records or memories were found in that file.' . ($skipped ? ' ' . implode(' ', array_slice($skipped, 0, 3)) : '')
                 );
+            }
+            // The photos stay in a temporary copy of the file until the import is confirmed.
+            $stagedFile = null;
+            if ($memories['posts']) {
+                $stagedFile = sys_get_temp_dir() . DIRECTORY_SEPARATOR . 'tsv-import-' . bin2hex(random_bytes(8)) . '.sql';
+                if (!move_uploaded_file($upload['tmp_name'], $stagedFile)) {
+                    throw new InvalidArgumentException('Could not read the uploaded backup. Please try again.');
+                }
+            }
+            if (is_string($_SESSION['import_preview']['memory_file'] ?? null)) {
+                @unlink($_SESSION['import_preview']['memory_file']);
             }
             $_SESSION['import_preview'] = [
                 'file' => mb_substr(basename((string) $upload['name']), 0, 120),
                 'mode' => $mode,
                 'records' => $records,
                 'skipped' => $skipped,
+                'memory_file' => $stagedFile,
+                'memory_posts' => count($memories['posts']),
+                'memory_photos' => $memories['photo_count'],
+                'memory_videos' => $memories['video_count'],
             ];
             header('Location: index.php?action=import_review');
             exit;
@@ -279,25 +358,128 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             $errors[] = 'There is no import waiting for confirmation. Please upload the file again.';
             $action = 'list';
         } else {
+            $replace = $preview['mode'] === 'replace';
+            $memoryFile = is_string($preview['memory_file'] ?? null) ? $preview['memory_file'] : null;
+            $messages = [];
             try {
-                $count = importOfficers($pdo, $preview['records'], $preview['mode'] === 'replace');
-                renumberOfficers($pdo);
-                flash('Import Complete', $preview['mode'] === 'replace'
-                    ? "{$count} officer records were restored."
-                    : "{$count} officer records were added.");
+                set_time_limit(300);
+                // Officers are only replaced when the file has officers, memories only when it has memories.
+                if ($preview['records']) {
+                    $count = importOfficers($pdo, $preview['records'], $replace);
+                    renumberOfficers($pdo);
+                    $messages[] = $replace ? "{$count} officer records were restored." : "{$count} officer records were added.";
+                }
+                if ($memoryFile && is_file($memoryFile)) {
+                    $backup = (string) file_get_contents($memoryFile);
+                    $memories = parseMemorySqlDump($backup);
+                    $pdo->beginTransaction();
+                    $added = importMemories($pdo, $memories['posts'], $replace, $backup);
+                    $pdo->commit();
+                    unset($backup);
+                    $messages[] = "{$added['posts']} memories with {$added['photos']} photos"
+                        . ($added['videos'] ? " and {$added['videos']} videos" : '') . ' were ' . ($replace ? 'restored.' : 'added.');
+                }
+                flash('Import Complete', implode(' ', $messages));
                 header('Location: index.php');
                 exit;
             } catch (PDOException $e) {
-                error_log('Import officers failed: ' . $e->getMessage());
-                $errors[] = 'The import failed and no records were changed. The file may contain duplicate record IDs.';
+                if ($pdo->inTransaction()) {
+                    $pdo->rollBack();
+                }
+                error_log('Import failed: ' . $e->getMessage());
+                $errors[] = $messages
+                    ? implode(' ', $messages) . ' The memories could not be imported, so they were left unchanged.'
+                    : 'The import failed and no records were changed. The file may contain duplicate record IDs.';
                 $action = 'list';
+            } finally {
+                if ($memoryFile) {
+                    @unlink($memoryFile);
+                }
             }
         }
     } elseif ($postAction === 'import_cancel') {
+        if (is_string($_SESSION['import_preview']['memory_file'] ?? null)) {
+            @unlink($_SESSION['import_preview']['memory_file']);
+        }
         unset($_SESSION['import_preview']);
         flash('Import Cancelled', 'No records were changed.', 'info');
         header('Location: index.php');
         exit;
+    } elseif (in_array($postAction, ['memory_create', 'memory_add_photo', 'memory_video_start', 'memory_video_chunk', 'memory_video_finish', 'memory_update', 'memory_delete'], true)) {
+        try {
+            $postId = (int) ($_POST['post_id'] ?? 0);
+            if ($postAction !== 'memory_create' && !memoryPostExists($pdo, $postId)) {
+                throw new InvalidArgumentException('That memory no longer exists. Reload the page.');
+            }
+            if ($postAction === 'memory_create') {
+                $statement = $pdo->prepare(
+                    'INSERT INTO memory_posts (taken_on, caption, created_at, updated_at) VALUES (:taken_on, :caption, NOW(), NOW())'
+                );
+                $statement->execute(['taken_on' => memoryDate($_POST['taken_on'] ?? ''), 'caption' => memoryCaption($_POST['caption'] ?? '')]);
+                sendJson(['success' => true, 'id' => (int) $pdo->lastInsertId()]);
+            }
+            if ($postAction === 'memory_add_photo') {
+                $row = memoryPhotoRow($_POST['photo'] ?? '', $_POST['thumb'] ?? '');
+                $photoId = addMemoryMedia($pdo, $postId, $row);
+                if (($_POST['edit'] ?? '') === '1') {
+                    touchMemoryPost($pdo, $postId);
+                }
+                sendJson(['success' => true, 'photo' => ['id' => $photoId, 'w' => $row['width'], 'h' => $row['height']]]);
+            }
+            // A video arrives in three steps: its details and poster frame, its 512 KB pieces, then a final check.
+            if ($postAction === 'memory_video_start') {
+                $row = memoryVideoRow($_POST['mime'] ?? '', $_POST['size'] ?? 0, $_POST['width'] ?? 0, $_POST['height'] ?? 0, $_POST['duration'] ?? 0, $_POST['poster'] ?? '');
+                sendJson(['success' => true, 'id' => addMemoryMedia($pdo, $postId, $row, false), 'chunk' => MEMORY_VIDEO_CHUNK_BYTES]);
+            }
+            if ($postAction === 'memory_video_chunk') {
+                addVideoChunk($pdo, (int) ($_POST['media_id'] ?? 0), $postId, (int) ($_POST['seq'] ?? -1), $_FILES['chunk'] ?? null);
+                sendJson(['success' => true]);
+            }
+            if ($postAction === 'memory_video_finish') {
+                $mediaId = (int) ($_POST['media_id'] ?? 0);
+                finishVideo($pdo, $mediaId, $postId);
+                if (($_POST['edit'] ?? '') === '1') {
+                    touchMemoryPost($pdo, $postId);
+                }
+                $video = $pdo->query('SELECT width, height, duration_ms FROM memory_photos WHERE id = ' . $mediaId)->fetch();
+                sendJson(['success' => true, 'photo' => [
+                    'id' => $mediaId,
+                    'w' => (int) $video['width'],
+                    'h' => (int) $video['height'],
+                    'video' => true,
+                    'duration' => round((int) $video['duration_ms'] / 1000, 1),
+                ]]);
+            }
+            if ($postAction === 'memory_update') {
+                $pdo->beginTransaction();
+                $pdo->prepare('UPDATE memory_posts SET taken_on = :taken_on, caption = :caption, updated_at = GREATEST(NOW(), created_at + INTERVAL 1 SECOND) WHERE id = :id')->execute([
+                    'taken_on' => memoryDate($_POST['taken_on'] ?? ''),
+                    'caption' => memoryCaption($_POST['caption'] ?? ''),
+                    'id' => $postId,
+                ]);
+                $removed = array_filter(array_map('intval', is_array($_POST['remove_photos'] ?? null) ? $_POST['remove_photos'] : []));
+                foreach ($removed as $photoId) {
+                    deleteMemoryMedia($pdo, $photoId, $postId);
+                }
+                $pdo->commit();
+                sendJson(['success' => true]);
+            }
+            $pdo->beginTransaction();
+            deleteMemoryPost($pdo, $postId);
+            $pdo->commit();
+            sendJson(['success' => true]);
+        } catch (InvalidArgumentException $e) {
+            if ($pdo->inTransaction()) {
+                $pdo->rollBack();
+            }
+            sendJson(['success' => false, 'message' => $e->getMessage()], 422);
+        } catch (Throwable $e) {
+            if ($pdo->inTransaction()) {
+                $pdo->rollBack();
+            }
+            error_log('TSV Memories failed: ' . $e->getMessage());
+            sendJson(['success' => false, 'message' => 'Could not save the memory. Please try again.'], 500);
+        }
     } elseif ($postAction === 'save_suguan') {
         try {
             $monday = suguanWeekStart(is_string($_POST['week'] ?? null) ? $_POST['week'] : null);
@@ -373,15 +555,24 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $lecture = is_string($rawLecture) ? trim($rawLecture) : '';
         $rawAgendaTopics = $_POST['agenda_topics'] ?? '';
         $agendaTopics = parseAgendaTopics(is_string($rawAgendaTopics) ? $rawAgendaTopics : '');
-        // Recruit rows: a name and an optional birthday from the date picker.
+        // Recruit rows: a name plus an optional birthday and wedding date (neither later than today).
         $recruits = [];
         $recruitBirthdays = is_array($_POST['recruit_birthday'] ?? null) ? array_values($_POST['recruit_birthday']) : [];
+        $recruitWeddings = is_array($_POST['recruit_wedding'] ?? null) ? array_values($_POST['recruit_wedding']) : [];
+        $pastDate = static function (mixed $value): string {
+            $value = is_string($value) ? trim($value) : '';
+            $date = DateTimeImmutable::createFromFormat('!Y-m-d', $value);
+
+            return $date && $date->format('Y-m-d') === $value && $value <= date('Y-m-d') ? $value : '';
+        };
         foreach (is_array($_POST['recruit_name'] ?? null) ? array_values($_POST['recruit_name']) : [] as $index => $rawName) {
             $name = is_string($rawName) ? trim($rawName) : '';
-            $birthday = is_string($recruitBirthdays[$index] ?? null) ? trim($recruitBirthdays[$index]) : '';
-            $birthdayDate = DateTimeImmutable::createFromFormat('!Y-m-d', $birthday);
             if ($name !== '') {
-                $recruits[] = [mb_substr($name, 0, 150), $birthdayDate && $birthdayDate->format('Y-m-d') === $birthday ? $birthday : ''];
+                $recruits[] = [
+                    mb_substr($name, 0, 150),
+                    $pastDate($recruitBirthdays[$index] ?? ''),
+                    $pastDate($recruitWeddings[$index] ?? ''),
+                ];
             }
         }
         $rawMonthlyDate = $_POST['monthly_date'] ?? '';
@@ -390,7 +581,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $needsMeetingDetails = array_intersect(['weekly_attendance', 'meeting_agenda'], $selectedForms) !== [];
         $reportMonth = reportMonthStart(is_string($_POST['report_month'] ?? null) ? $_POST['report_month'] : null, new DateTimeZone('Asia/Manila'));
         $postedText = static fn(string $key): string => is_string($_POST[$key] ?? null) ? trim($_POST[$key]) : '';
-        $webexName = $postedText('webex_display_name');
+        // Left blank, the Webex name falls back to the one saved under Signatories.
+        $webexName = $postedText('webex_display_name') ?: (string) (loadSettings($pdo)['webex_display_name'] ?? '');
         $webexCount = $postedText('webex_count') === '' ? '0' : $postedText('webex_count');
         // The reason only applies when Webex was not used at all; left blank, it reads "Wala pong aktibidad".
         $webexReason = $webexCount === '0' ? ($postedText('webex_reason') ?: 'Wala pong aktibidad') : '';
@@ -433,8 +625,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             $errors[] = min($recruitCount, 20) === 1 ? "Enter the recruit's name." : 'Enter the names of all ' . min($recruitCount, 20) . ' recruits.';
         }
         if (in_array('tsv_form3', $selectedForms, true)) {
-            if ($webexName === '' || mb_strlen($webexName) > 150 || mb_strlen($webexCount) > 50 || mb_strlen($webexReason) > 250) {
-                $errors[] = 'Enter the Webex display name (150 characters or fewer) and a short usage count and reason.';
+            if (mb_strlen($webexName) > 150 || mb_strlen($webexCount) > 50 || mb_strlen($webexReason) > 250) {
+                $errors[] = 'The Webex display name must be 150 characters or fewer, with a short usage count and reason.';
             }
             if (!ctype_digit($webexCount)) {
                 $errors[] = 'Bilang kung ilang beses ginamit must be a whole number.';
@@ -452,11 +644,12 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             }
         }
         if (in_array('meeting_agenda', $selectedForms, true)) {
-            if ($firstPrayer === '' || mb_strlen($firstPrayer) > 150) {
-                $errors[] = 'Enter the name for Unang Panalangin (150 characters or fewer).';
+            // Both prayers are optional; left blank, the line prints as just "Unang Panalangin:".
+            if (mb_strlen($firstPrayer) > 150) {
+                $errors[] = 'Unang Panalangin must be 150 characters or fewer.';
             }
-            if ($lastPrayer === '' || mb_strlen($lastPrayer) > 150) {
-                $errors[] = 'Enter the name for Huling Panalangin (150 characters or fewer).';
+            if (mb_strlen($lastPrayer) > 150) {
+                $errors[] = 'Huling Panalangin must be 150 characters or fewer.';
             }
             if (mb_strlen($lecture) > 150) {
                 $errors[] = 'Pagpapayo/Lektura must be 150 characters or fewer.';
@@ -481,11 +674,15 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                      VALUES (:setting_key, :setting_value)
                      ON DUPLICATE KEY UPDATE setting_value = VALUES(setting_value)'
                 );
-                foreach (array_filter([
+                $meetingSettings = array_filter([
                     'weekly_meeting_datetime' => $meetingDateTime,
                     'weekly_meeting_venue' => $meetingVenue,
-                    'webex_display_name' => $webexName,
-                ], static fn(string $value): bool => $value !== '') as $settingKey => $settingValue) {
+                ], static fn(string $value): bool => $value !== '');
+                // The recruit list is remembered for the next monthly attendance until it is changed.
+                if (in_array('monthly_attendance', $selectedForms, true)) {
+                    $meetingSettings['monthly_recruits'] = json_encode($recruits, JSON_UNESCAPED_UNICODE);
+                }
+                foreach ($meetingSettings as $settingKey => $settingValue) {
                     $saveMeetingSetting->execute([
                         'setting_key' => $settingKey,
                         'setting_value' => $settingValue,
@@ -718,6 +915,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             'district_name' => 'District',
             'district_supervisor' => 'Tagapangasiwa ng Distrito',
             'district_tsv_overseer' => 'District TSV Overseer',
+            'webex_display_name' => 'Webex display name',
+            'pd_tagasubaybay_birthday' => 'PD Tagasubaybay birthday',
+            'pd_tagasubaybay_wedding' => 'PD Tagasubaybay wedding anniversary',
         ];
         $signatoryValues = [];
         foreach ($signatoryFields as $key => $label) {
@@ -725,6 +925,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             $value = is_string($rawValue) ? trim($rawValue) : '';
             if (mb_strlen($value) > 150) {
                 $errors[] = "{$label} name must be 150 characters or fewer.";
+            }
+            if (str_starts_with($key, 'pd_tagasubaybay_')) {
+                $value = validDate($value, $label, $errors, true) ?? '';
             }
             $signatoryValues[$key] = $value;
         }
@@ -767,11 +970,13 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $rawOath = is_string($_POST['oath_taking_date'] ?? '') ? (string) $_POST['oath_taking_date'] : '';
         $rawNdi = is_string($_POST['ndi_signing_date'] ?? '') ? (string) $_POST['ndi_signing_date'] : '';
         $rawBirthday = is_string($_POST['birthday'] ?? '') ? (string) $_POST['birthday'] : '';
+        $rawWedding = is_string($_POST['wedding_anniversary'] ?? '') ? (string) $_POST['wedding_anniversary'] : '';
         $oathText = trim($rawOath) === '' ? null : trim($rawOath);
         $ndiText = trim($rawNdi) === '' ? null : trim($rawNdi);
         $oathDate = $oathText === null ? null : normalizeFullDate($oathText);
         $ndiDate = $ndiText === null ? null : normalizeFullDate($ndiText);
-        $birthday = validDate($rawBirthday, 'Birthday', $errors);
+        $birthday = validDate($rawBirthday, 'Birthday', $errors, true);
+        $weddingAnniversary = validDate($rawWedding, 'Wedding anniversary', $errors, true);
 
         if ($idValue !== '' && (!is_int($id) || $id < 1)) {
             $errors[] = 'A valid officer ID is required.';
@@ -795,9 +1000,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     $masterlistNumber = (int) $pdo->query('SELECT COALESCE(MAX(masterlist_number), 0) + 1 FROM officers')->fetchColumn();
                     $statement = $pdo->prepare(
                         'INSERT INTO officers (masterlist_number, name, tungkulin, oath_taking_date, oath_taking_text,
-                             ndi_signing_date, ndi_signing_text, birthday, contact_telegram, is_active)
+                             ndi_signing_date, ndi_signing_text, birthday, wedding_anniversary, contact_telegram, is_active)
                          VALUES (:masterlist_number, :name, :tungkulin, :oath_taking_date, :oath_taking_text,
-                             :ndi_signing_date, :ndi_signing_text, :birthday, :contact_telegram, :is_active)'
+                             :ndi_signing_date, :ndi_signing_text, :birthday, :wedding_anniversary, :contact_telegram, :is_active)'
                     );
                     $statement->execute([
                         'masterlist_number' => $masterlistNumber,
@@ -809,6 +1014,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                         'ndi_signing_text' => $ndiText,
                         'is_active' => $isActive,
                         'birthday' => $birthday,
+                        'wedding_anniversary' => $weddingAnniversary,
                         'contact_telegram' => $contactTelegram,
                     ]);
                     flash('Officer Added', $name . ' was added as Blg. ' . $masterlistNumber . '.');
@@ -818,7 +1024,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                          SET name = :name, tungkulin = :tungkulin,
                              oath_taking_date = :oath_taking_date, oath_taking_text = :oath_taking_text,
                              ndi_signing_date = :ndi_signing_date, ndi_signing_text = :ndi_signing_text,
-                             is_active = :is_active, birthday = :birthday, contact_telegram = :contact_telegram
+                             is_active = :is_active, birthday = :birthday,
+                             wedding_anniversary = :wedding_anniversary, contact_telegram = :contact_telegram
                          WHERE id = :id'
                     );
                     $statement->execute([
@@ -830,6 +1037,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                         'ndi_signing_text' => $ndiText,
                         'is_active' => $isActive,
                         'birthday' => $birthday,
+                        'wedding_anniversary' => $weddingAnniversary,
                         'contact_telegram' => $contactTelegram,
                         'id' => $id,
                     ]);
@@ -981,6 +1189,8 @@ function icon(string $name): string
         'trash' => '<path d="M3 6h18"/><path d="M8 6V4h8v2"/><path d="m19 6-1 14H6L5 6"/><path d="M10 11v6M14 11v6"/>',
         'check' => '<path d="M20 6 9 17l-5-5"/>',
         'upload' => '<path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><path d="m17 8-5-5-5 5"/><path d="M12 3v12"/>',
+        'image' => '<rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="9" cy="9" r="2"/><path d="m21 15-3.1-3.1a2 2 0 0 0-2.8 0L6 21"/>',
+        'more' => '<circle cx="12" cy="12" r="1"/><circle cx="19" cy="12" r="1"/><circle cx="5" cy="12" r="1"/>',
         'database' => '<ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M3 5v14c0 1.7 4 3 9 3s9-1.3 9-3V5"/><path d="M3 12c0 1.7 4 3 9 3s9-1.3 9-3"/>',
     ];
 
@@ -998,6 +1208,9 @@ $signatories = [
     'district_name' => '',
     'district_supervisor' => '',
     'district_tsv_overseer' => '',
+    'webex_display_name' => '',
+    'pd_tagasubaybay_birthday' => '',
+    'pd_tagasubaybay_wedding' => '',
 ];
 $weeklyMeeting = [
     'webex_display_name' => '',
@@ -1014,6 +1227,7 @@ $agendaValues = [
     'webex_count' => '',
     'webex_reason' => '',
 ];
+$savedRecruits = '[]';
 $printSelections = [];
 foreach ($printForms as $frequency => $forms) {
     foreach (array_keys($forms) as $formKey) {
@@ -1026,8 +1240,8 @@ foreach ($settingsStatement->fetchAll() as $setting) {
         $signatories[$setting['setting_key']] = $setting['setting_value'];
     } elseif ($setting['setting_key'] === 'weekly_meeting_datetime') {
         $weeklyMeeting['datetime'] = $setting['setting_value'];
-    } elseif ($setting['setting_key'] === 'webex_display_name') {
-        $weeklyMeeting['webex_display_name'] = $setting['setting_value'];
+    } elseif ($setting['setting_key'] === 'monthly_recruits') {
+        $savedRecruits = $setting['setting_value'];
     } elseif ($setting['setting_key'] === 'weekly_meeting_venue') {
         $weeklyMeeting['venue'] = $setting['setting_value'];
     } elseif (str_starts_with($setting['setting_key'], 'print_form_')) {
@@ -1037,6 +1251,8 @@ foreach ($settingsStatement->fetchAll() as $setting) {
         }
     }
 }
+$weeklyMeeting['webex_display_name'] = $signatories['webex_display_name'];
+$postedWebexName = is_string($_POST['webex_display_name'] ?? null) ? trim($_POST['webex_display_name']) : '';
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['action'] ?? '') === 'generate_print_forms') {
     $meetingDateTimeValue = $_POST['meeting_datetime'] ?? '';
     $meetingVenueValue = $_POST['meeting_venue'] ?? '';
@@ -1065,6 +1281,7 @@ $formValues = is_array($editingOfficer) ? $editingOfficer : [
     'ndi_signing_text' => '',
     'is_active' => 1,
     'birthday' => '',
+    'wedding_anniversary' => '',
     'contact_telegram' => '',
 ];
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && $action === 'form') {
@@ -1074,6 +1291,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && $action === 'form') {
     $repostOath = $_POST['oath_taking_date'] ?? '';
     $repostNdi = $_POST['ndi_signing_date'] ?? '';
     $repostBirthday = $_POST['birthday'] ?? '';
+    $repostWedding = $_POST['wedding_anniversary'] ?? '';
     $repostContact = $_POST['contact_telegram'] ?? '';
     $formValues = array_merge($formValues, [
         'id' => is_string($repostId) || is_int($repostId) ? (string) $repostId : '',
@@ -1083,6 +1301,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && $action === 'form') {
         'ndi_signing_date' => is_string($repostNdi) ? $repostNdi : '',
         'is_active' => ($_POST['is_active'] ?? '') === '1' ? 1 : 0,
         'birthday' => is_string($repostBirthday) ? $repostBirthday : '',
+        'wedding_anniversary' => is_string($repostWedding) ? $repostWedding : '',
         'contact_telegram' => is_string($repostContact) ? trim($repostContact) : '',
     ]);
 }
@@ -1104,7 +1323,7 @@ $isEditing = !empty($formValues['id']);
             document.documentElement.dataset.theme = 'dark';
         }
     </script>
-    <link rel="stylesheet" href="style.css?v=19">
+    <link rel="stylesheet" href="style.css?v=29">
 </head>
 <body>
 <div class="shell">
@@ -1122,6 +1341,7 @@ $isEditing = !empty($formValues['id']);
             <?php else: ?>
                 <a class="side-link" href="index.php#generator"><?= icon('printer') ?><span>Form generator</span></a>
             <?php endif; ?>
+            <a class="side-link <?= $action === 'memories' ? 'is-active' : '' ?>" href="index.php?action=memories"><?= icon('image') ?><span>TSV Memories</span></a>
             <a class="side-link <?= $action === 'settings' ? 'is-active' : '' ?>" href="index.php?action=settings"><?= icon('pen') ?><span>Signatories</span></a>
         </nav>
         <div class="side-footer">
@@ -1139,6 +1359,8 @@ $isEditing = !empty($formValues['id']);
                     <span class="crumb-sep">/</span><span><?= $isEditing ? 'Edit' : 'New' ?></span>
                 <?php elseif ($action === 'settings'): ?>
                     <span class="crumb-sep">/</span><span>Signatories</span>
+                <?php elseif ($action === 'memories'): ?>
+                    <span class="crumb-sep">/</span><span>TSV Memories</span>
                 <?php endif; ?>
             </div>
             <div class="topbar-actions">
@@ -1178,6 +1400,10 @@ $isEditing = !empty($formValues['id']);
                                 <span>District (Distrito)</span>
                                 <input name="district_name" type="text" maxlength="150" value="<?= h($signatories['district_name']) ?>">
                             </label>
+                            <label class="field">
+                                <span>Webex display name</span>
+                                <input name="webex_display_name" type="text" maxlength="150" placeholder="MKN-FYM Avenue" value="<?= h($signatories['webex_display_name']) ?>">
+                            </label>
                             <h2 class="field-wide form-section-title">Signatories</h2>
                             <label class="field">
                                 <span>Pastor</span>
@@ -1186,6 +1412,14 @@ $isEditing = !empty($formValues['id']);
                             <label class="field">
                                 <span>PD Tagasubaybay</span>
                                 <input name="pd_tagasubaybay" type="text" maxlength="150" value="<?= h($signatories['pd_tagasubaybay']) ?>">
+                            </label>
+                            <label class="field">
+                                <span>PD Tagasubaybay birthday (optional)</span>
+                                <input name="pd_tagasubaybay_birthday" type="date" max="<?= h($today->format('Y-m-d')) ?>" value="<?= h($signatories['pd_tagasubaybay_birthday']) ?>">
+                            </label>
+                            <label class="field">
+                                <span>PD Tagasubaybay wedding anniversary (optional)</span>
+                                <input name="pd_tagasubaybay_wedding" type="date" max="<?= h($today->format('Y-m-d')) ?>" value="<?= h($signatories['pd_tagasubaybay_wedding']) ?>">
                             </label>
                             <label class="field">
                                 <span>TSV Lead</span>
@@ -1222,13 +1456,24 @@ $isEditing = !empty($formValues['id']);
                 <div class="page-title">
                     <a class="back-link" href="index.php"><?= icon('arrow-left') ?>Back to officers</a>
                     <h1>Review import</h1>
-                    <p><?= h($preview['file']) ?> · <?= count($preview['records']) ?> officer records found<?= $preview['skipped'] ? ' · ' . count($preview['skipped']) . ' skipped' : '' ?></p>
+                    <p><?= h($preview['file']) ?> · <?= count($preview['records']) ?> officer records found<?= $preview['skipped'] ? ' · ' . count($preview['skipped']) . ' skipped' : '' ?><?= !empty($preview['memory_posts']) ? ' · ' . (int) $preview['memory_posts'] . ' memories with ' . (int) $preview['memory_photos'] . ' photos' . (!empty($preview['memory_videos']) ? ' and ' . (int) $preview['memory_videos'] . ' videos' : '') : '' ?></p>
                 </div>
                 <div class="confirm-box <?= $isReplace ? 'confirm-danger' : '' ?>">
                     <strong>Are you sure?</strong>
-                    <p><?= $isReplace
-                        ? 'This will permanently delete all ' . $officerTotals['total'] . ' current officer records and replace them with the ' . count($preview['records']) . ' records below. Export an SQL backup first if you might need the current records.'
-                        : 'This will add the ' . count($preview['records']) . ' records below to the ' . $officerTotals['total'] . ' existing officer records. Blg. numbers that are already in use will be left blank.' ?></p>
+                    <p><?php
+                        $memoryNote = !empty($preview['memory_posts'])
+                            ? ($isReplace
+                                ? ' All current TSV Memories will also be replaced with the ' . (int) $preview['memory_posts'] . ' memories in the file.'
+                                : ' The ' . (int) $preview['memory_posts'] . ' memories in the file will be added to TSV Memories; photos and videos that are already there are skipped.')
+                            : '';
+                        if (!$preview['records']) {
+                            echo h('This file has no officer records, so the officers are left unchanged.' . $memoryNote);
+                        } else {
+                            echo h(($isReplace
+                                ? 'This will permanently delete all ' . $officerTotals['total'] . ' current officer records and replace them with the ' . count($preview['records']) . ' records below. Export an SQL backup first if you might need the current records.'
+                                : 'This will add the ' . count($preview['records']) . ' records below to the ' . $officerTotals['total'] . ' existing officer records. Blg. numbers that are already in use will be left blank.') . $memoryNote);
+                        }
+                    ?></p>
                 </div>
                 <?php if ($preview['skipped']): ?>
                     <div class="alert alert-error">
@@ -1267,6 +1512,94 @@ $isEditing = !empty($formValues['id']);
                         </form>
                     </div>
                 </section>
+            <?php elseif ($action === 'memories'): ?>
+                <div class="page-title page-title-row">
+                    <div>
+                        <h1>TSV Memories</h1>
+                        <p>Photos and videos of TSV activities, kept by date. They are included in Export SQL backups.</p>
+                    </div>
+                    <div class="page-title-actions">
+                        <button class="button" type="button" data-memory-new><?= icon('plus') ?>New memory</button>
+                    </div>
+                </div>
+                <div class="memories" data-memories>
+                    <div class="memories-toolbar">
+                        <div class="segmented" role="tablist" aria-label="View">
+                            <button type="button" role="tab" data-view="timeline">Timeline</button>
+                            <button type="button" role="tab" data-view="horizontal">Horizontal</button>
+                            <button type="button" role="tab" data-view="gallery">Gallery</button>
+                            <button type="button" role="tab" data-view="calendar">Calendar</button>
+                        </div>
+                        <label class="pill">
+                            <span class="pill-label">Year</span>
+                            <select data-year-filter aria-label="Filter by year"><option value="">All years</option></select>
+                        </label>
+                    </div>
+                    <section class="memories-onthisday" data-on-this-day hidden></section>
+                    <div data-memories-view></div>
+                </div>
+                <dialog class="generator-dialog memory-composer" id="memory-composer" aria-labelledby="memory-composer-title">
+                    <form class="generator-form" data-memory-form novalidate>
+                        <div class="generator-heading">
+                            <div>
+                                <h2 id="memory-composer-title" data-composer-title>New memory</h2>
+                                <p class="muted" data-composer-hint>Add photos or videos, a caption and the date of the activity.</p>
+                            </div>
+                            <button class="dialog-close" type="button" data-composer-close aria-label="Close"><?= icon('x') ?></button>
+                        </div>
+                        <div class="generator-body composer-body">
+                            <label class="field">
+                                <span>Caption</span>
+                                <textarea name="caption" rows="3" maxlength="2000" placeholder="What happened? e.g. Paglilinis ng kapilya kasama ang mga TSV officers"></textarea>
+                            </label>
+                            <label class="field">
+                                <span>Date of the activity (optional — leave blank to use today)</span>
+                                <input name="taken_on" type="date" max="<?= h($today->format('Y-m-d')) ?>">
+                            </label>
+                            <div class="field">
+                                <span>Photos and videos</span>
+                                <div class="composer-photos" data-composer-photos></div>
+                                <label class="dropzone composer-drop" data-composer-drop>
+                                    <input class="dropzone-input" type="file" accept="image/*,video/*" multiple data-composer-files>
+                                    <span class="dropzone-icon"><?= icon('image') ?></span>
+                                    <strong>Drag &amp; drop photos or videos here</strong>
+                                    <span class="muted">or click to choose · photos are resized · videos up to <?= intdiv(MEMORY_VIDEO_MAX_BYTES, 1024 * 1024) ?> MB (MP4, WebM or MOV)</span>
+                                </label>
+                            </div>
+                            <p class="composer-status" data-composer-status role="status"></p>
+                        </div>
+                        <div class="panel-footer">
+                            <span class="muted composer-count" data-composer-count></span>
+                            <div class="form-actions">
+                                <button class="button button-light" type="button" data-composer-close>Cancel</button>
+                                <button class="button" type="submit" data-composer-submit>Post</button>
+                            </div>
+                        </div>
+                    </form>
+                </dialog>
+                <div class="lightbox" data-lightbox hidden>
+                    <button class="lightbox-close" type="button" data-lightbox-close aria-label="Close"><?= icon('x') ?></button>
+                    <button class="lightbox-nav lightbox-prev" type="button" data-lightbox-step="-1" aria-label="Previous photo"><?= icon('chevron-left') ?></button>
+                    <figure class="lightbox-figure">
+                        <img data-lightbox-image alt="">
+                        <div class="lightbox-player" data-lightbox-player hidden></div>
+                        <figcaption>
+                            <div class="lightbox-meta"><strong data-lightbox-date></strong><span class="muted" data-lightbox-count></span></div>
+                            <p data-lightbox-caption></p>
+                            <div class="lightbox-actions">
+                                <button class="button button-light" type="button" data-lightbox-edit><?= icon('pen') ?>Edit post</button>
+                                <a class="button button-light" data-lightbox-download href="#"><?= icon('download') ?>Download</a>
+                            </div>
+                        </figcaption>
+                    </figure>
+                    <button class="lightbox-nav lightbox-next" type="button" data-lightbox-step="1" aria-label="Next photo"><?= icon('chevron-right') ?></button>
+                </div>
+                <script type="application/json" id="memories-data"><?= json_encode([
+                    'posts' => memoriesPayload($pdo),
+                    'csrf' => $_SESSION['csrf_token'],
+                    'today' => $today->format('Y-m-d'),
+                    'videoMaxBytes' => MEMORY_VIDEO_MAX_BYTES,
+                ], JSON_HEX_TAG | JSON_HEX_AMP | JSON_HEX_APOS | JSON_HEX_QUOT) ?></script>
             <?php elseif ($action === 'form'): ?>
                 <div class="page-title">
                     <a class="back-link" href="index.php"><?= icon('arrow-left') ?>Back to officers</a>
@@ -1307,11 +1640,15 @@ $isEditing = !empty($formValues['id']);
                             </label>
                             <label class="field">
                                 <span>Date of NDA signing</span>
-                                <input name="ndi_signing_date" type="text" maxlength="50" placeholder="Full date, month and year, or N/A" value="<?= h((string) (($formValues['ndi_signing_text'] ?? '') ?: ($formValues['ndi_signing_date'] ?? ''))) ?>">
+                                <input name="ndi_signing_date" type="text" maxlength="50" placeholder="If not applicable, just leave empty" value="<?= h((string) (($formValues['ndi_signing_text'] ?? '') ?: ($formValues['ndi_signing_date'] ?? ''))) ?>">
                             </label>
                             <label class="field">
                                 <span>Birthday</span>
-                                <input name="birthday" type="date" value="<?= h((string) $formValues['birthday']) ?>">
+                                <input name="birthday" type="date" max="<?= h($today->format('Y-m-d')) ?>" value="<?= h((string) $formValues['birthday']) ?>">
+                            </label>
+                            <label class="field">
+                                <span>Wedding anniversary (optional)</span>
+                                <input name="wedding_anniversary" type="date" max="<?= h($today->format('Y-m-d')) ?>" value="<?= h((string) ($formValues['wedding_anniversary'] ?? '')) ?>">
                             </label>
                             <label class="field">
                                 <span>Contact (Active) Telegram #</span>
@@ -1335,7 +1672,7 @@ $isEditing = !empty($formValues['id']);
                     </div>
                     <div class="page-title-actions">
                         <button class="button button-light" type="button" data-open-import><?= icon('upload') ?>Import</button>
-                        <a class="button button-light" href="index.php?action=export_sql" title="Backup of the officer records table" data-download-toast="Backup Exported" data-download-message="The officer records were saved as an SQL file."><?= icon('database') ?>Export SQL</a>
+                        <a class="button button-light" href="index.php?action=export_sql" title="Backup of the officer records and TSV Memories photos" data-download-toast="Backup Exported" data-download-message="The officer records and memories were saved as an SQL file."><?= icon('database') ?>Export SQL</a>
                         <a class="button button-light" href="index.php?action=export_xlsx" data-download-toast="Excel Exported" data-download-message="The masterlist was saved as an Excel file."><?= icon('sheet') ?>Export Excel</a>
                         <form method="post" action="index.php" data-download-toast="Masterlist Generated!" data-download-message="The masterlist DOCX is downloading.">
                             <input type="hidden" name="download_token" value="">
@@ -1492,7 +1829,7 @@ $isEditing = !empty($formValues['id']);
                                 <input class="dropzone-input" name="import_file" type="file" accept=".sql,.mysql,.txt" required data-import-file>
                                 <span class="dropzone-icon"><?= icon('upload') ?></span>
                                 <strong data-dropzone-title>Drag &amp; drop your backup here</strong>
-                                <span class="muted" data-dropzone-hint>or click to browse · .sql or .mysql, up to 5 MB</span>
+                                <span class="muted" data-dropzone-hint data-max-bytes="<?= importMaxBytes() ?>">or click to browse · .sql or .mysql, up to <?= h(formatBytes(importMaxBytes())) ?></span>
                             </label>
                             <fieldset class="generator-group import-modes">
                                 <legend>Import mode</legend>
@@ -1589,11 +1926,11 @@ $isEditing = !empty($formValues['id']);
                                 <legend>Meeting agenda details</legend>
                                 <div class="form-grid">
                                     <label class="field">
-                                        <span>Unang Panalangin</span>
+                                        <span>Unang Panalangin (optional)</span>
                                         <input name="first_prayer" type="text" maxlength="150" value="<?= h($agendaValues['first_prayer']) ?>">
                                     </label>
                                     <label class="field">
-                                        <span>Huling Panalangin</span>
+                                        <span>Huling Panalangin (optional)</span>
                                         <input name="last_prayer" type="text" maxlength="150" value="<?= h($agendaValues['last_prayer']) ?>">
                                     </label>
                                     <label class="field field-wide">
@@ -1618,35 +1955,47 @@ $isEditing = !empty($formValues['id']);
                                         <input name="monthly_date" type="text" maxlength="150" placeholder="<?= h($today->format('F j, Y')) ?>" value="<?= h($agendaValues['monthly_date']) ?>" data-required>
                                     </label>
                                     <?php
+                                    // After a failed submit the posted rows come back; otherwise the last generated list is shown.
                                     $recruitRows = [];
-                                    foreach ((array) ($_POST['recruit_name'] ?? []) as $index => $name) {
-                                        $recruitRows[] = [
-                                            is_string($name) ? $name : '',
-                                            is_string($_POST['recruit_birthday'][$index] ?? null) ? $_POST['recruit_birthday'][$index] : '',
-                                        ];
+                                    if (isset($_POST['recruit_count'])) {
+                                        foreach ((array) ($_POST['recruit_name'] ?? []) as $index => $name) {
+                                            $recruitRows[] = array_map(
+                                                static fn(mixed $value): string => is_string($value) ? $value : '',
+                                                [$name, $_POST['recruit_birthday'][$index] ?? '', $_POST['recruit_wedding'][$index] ?? '']
+                                            );
+                                        }
+                                        $recruitCountValue = (int) $_POST['recruit_count'];
+                                    } else {
+                                        foreach (json_decode($savedRecruits, true) ?: [] as $savedRecruit) {
+                                            if (is_array($savedRecruit)) {
+                                                $recruitRows[] = array_map('strval', array_pad(array_values($savedRecruit), 3, ''));
+                                            }
+                                        }
+                                        $recruitCountValue = count($recruitRows);
                                     }
                                     ?>
                                     <label class="field" data-only-for="monthly_attendance">
                                         <span>Bilang ng recruits</span>
-                                        <input name="recruit_count" type="number" min="0" max="20" step="1" value="<?= count($recruitRows) ?>">
+                                        <input name="recruit_count" type="number" min="0" max="20" step="1" value="<?= max(0, min(20, $recruitCountValue)) ?>">
                                     </label>
                                     <div class="field field-wide row-list" data-only-for="monthly_attendance" data-recruit-list>
                                         <span>Recruits</span>
                                         <div class="row-list-row recruit-row row-list-head" aria-hidden="true">
-                                            <span>Pangalan</span><span>Birthday (optional)</span>
+                                            <span>Pangalan</span><span>Birthday (optional)</span><span>Wedding (optional)</span>
                                         </div>
                                         <div data-rows="recruit_count" data-max-rows="20">
-                                            <?php foreach ($recruitRows ?: [['', '']] as [$recruitName, $recruitBirthday]): ?>
+                                            <?php foreach ($recruitRows ?: [['', '', '']] as [$recruitName, $recruitBirthday, $recruitWedding]): ?>
                                                 <div class="row-list-row recruit-row" data-row>
                                                     <input name="recruit_name[]" type="text" maxlength="150" aria-label="Pangalan ng recruit" value="<?= h($recruitName) ?>" data-required>
-                                                    <input name="recruit_birthday[]" type="date" aria-label="Birthday" value="<?= h($recruitBirthday) ?>">
+                                                    <input name="recruit_birthday[]" type="date" max="<?= h($today->format('Y-m-d')) ?>" aria-label="Birthday" value="<?= h($recruitBirthday) ?>">
+                                                    <input name="recruit_wedding[]" type="date" max="<?= h($today->format('Y-m-d')) ?>" aria-label="Wedding date" value="<?= h($recruitWedding) ?>">
                                                 </div>
                                             <?php endforeach; ?>
                                         </div>
                                     </div>
                                     <label class="field" data-only-for="tsv_form3">
-                                        <span>Webex display name</span>
-                                        <input name="webex_display_name" type="text" maxlength="150" value="<?= h($weeklyMeeting['webex_display_name']) ?>" data-required>
+                                        <span>Webex display name (optional)</span>
+                                        <input name="webex_display_name" type="text" maxlength="150" placeholder="<?= h($signatories['webex_display_name'] ?: 'Set it under Signatories') ?>" value="<?= h($postedWebexName) ?>">
                                     </label>
                                     <label class="field" data-only-for="tsv_form3">
                                         <span>Bilang kung ilang beses ginamit</span>
@@ -1712,7 +2061,9 @@ $isEditing = !empty($formValues['id']);
 </dialog>
 <div class="toast-region" data-toasts aria-live="polite"></div>
 <?php if ($toast): ?><script type="application/json" id="toast-data"><?= json_encode($toast, JSON_HEX_TAG | JSON_HEX_AMP | JSON_HEX_APOS | JSON_HEX_QUOT) ?></script><?php endif; ?>
-<script src="app.js?v=20"></script>
+<script src="datepicker.js?v=2"></script>
+<script src="app.js?v=23"></script>
 <?php if ($action === 'list'): ?><script src="suguan.js?v=5"></script><?php endif; ?>
+<?php if ($action === 'memories'): ?><script src="player.js?v=2"></script><script src="memories.js?v=7"></script><?php endif; ?>
 </body>
 </html>
