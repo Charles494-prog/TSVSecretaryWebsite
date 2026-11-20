@@ -14,7 +14,13 @@ const MEMORY_PHOTO_TYPES = ['image/jpeg', 'image/png', 'image/webp'];
 const MEMORY_VIDEO_TYPES = ['video/mp4', 'video/webm', 'video/quicktime', 'video/x-m4v', 'video/ogg'];
 const MEMORY_VIDEO_MAX_BYTES = 100 * 1024 * 1024;
 const MEMORY_VIDEO_CHUNK_BYTES = 512 * 1024;
-const MEMORY_POST_COLUMNS = ['id', 'taken_on', 'caption', 'created_at', 'updated_at'];
+const MEMORY_POST_COLUMNS = ['id', 'taken_on', 'caption', 'category', 'created_at', 'updated_at'];
+
+// Two collections that work the same way: TSV Memories and Formal Activities.
+function memoryCategory(mixed $value): string
+{
+    return $value === 'activities' ? 'activities' : 'memories';
+}
 const MEMORY_PHOTO_COLUMNS = ['id', 'post_id', 'position', 'kind', 'checksum', 'mime', 'width', 'height', 'duration_ms', 'size_bytes', 'photo', 'thumb'];
 const MEMORY_CHUNK_COLUMNS = ['media_id', 'seq', 'data'];
 
@@ -61,6 +67,10 @@ function ensureMemoryTables(PDO $pdo): void
         'complete' => 'ADD COLUMN complete TINYINT(1) NOT NULL DEFAULT 1 AFTER size_bytes',
         'uploaded_at' => 'ADD COLUMN uploaded_at DATETIME DEFAULT NULL AFTER complete',
     ];
+    $postColumns = array_column($pdo->query('SHOW COLUMNS FROM memory_posts')->fetchAll(), 'Field');
+    if (!in_array('category', $postColumns, true)) {
+        $pdo->exec("ALTER TABLE memory_posts ADD COLUMN category VARCHAR(20) NOT NULL DEFAULT 'memories' AFTER caption");
+    }
     foreach ($added as $column => $definition) {
         if (!in_array($column, $columns, true)) {
             $pdo->exec("ALTER TABLE memory_photos {$definition}");
@@ -107,10 +117,12 @@ function deleteMemoryPost(PDO $pdo, int $postId): void
 }
 
 // Everything the page needs to draw the feed, gallery and calendar, without the image or video data itself.
-function memoriesPayload(PDO $pdo): array
+function memoriesPayload(PDO $pdo, string $category = 'memories'): array
 {
     $posts = [];
-    foreach ($pdo->query('SELECT id, taken_on, caption, created_at, updated_at FROM memory_posts ORDER BY taken_on DESC, id DESC') as $row) {
+    $statement = $pdo->prepare('SELECT id, taken_on, caption, created_at, updated_at FROM memory_posts WHERE category = :category ORDER BY taken_on DESC, id DESC');
+    $statement->execute(['category' => $category]);
+    foreach ($statement->fetchAll() as $row) {
         $posts[(int) $row['id']] = [
             'id' => (int) $row['id'],
             'date' => $row['taken_on'],
@@ -481,6 +493,7 @@ function parseMemorySqlDump(string $sql): array
         $posts[(int) $row['id']] = [
             'taken_on' => $date->format('Y-m-d'),
             'caption' => mb_substr((string) ($row['caption'] ?? ''), 0, MEMORY_CAPTION_MAX),
+            'category' => memoryCategory($row['category'] ?? null),
             'created_at' => $stamp($row['created_at'] ?? null),
             'updated_at' => $stamp($row['updated_at'] ?? $row['created_at'] ?? null),
             'photos' => [],
@@ -524,7 +537,7 @@ function importMemories(PDO $pdo, array $posts, bool $replace, string $sql): arr
     }
     $known = $replace ? [] : array_flip($pdo->query('SELECT checksum FROM memory_photos WHERE complete = 1')->fetchAll(PDO::FETCH_COLUMN));
     $insertPost = $pdo->prepare(
-        'INSERT INTO memory_posts (taken_on, caption, created_at, updated_at) VALUES (:taken_on, :caption, :created_at, :updated_at)'
+        'INSERT INTO memory_posts (taken_on, caption, category, created_at, updated_at) VALUES (:taken_on, :caption, :category, :created_at, :updated_at)'
     );
     $insertMedia = $pdo->prepare(
         'INSERT INTO memory_photos (post_id, position, kind, checksum, mime, width, height, duration_ms, size_bytes, complete, uploaded_at, photo, thumb)
@@ -540,6 +553,7 @@ function importMemories(PDO $pdo, array $posts, bool $replace, string $sql): arr
         $insertPost->execute([
             'taken_on' => $post['taken_on'],
             'caption' => $post['caption'],
+            'category' => $post['category'],
             'created_at' => $post['created_at'],
             'updated_at' => $post['updated_at'],
         ]);

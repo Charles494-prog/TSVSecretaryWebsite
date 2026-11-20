@@ -30,13 +30,14 @@ require __DIR__ . '/docx.php';
 require __DIR__ . '/docx_templates.php';
 require __DIR__ . '/suguan.php';
 require __DIR__ . '/monthly_reports.php';
+require __DIR__ . '/directory.php';
 require __DIR__ . '/import_export.php';
 require __DIR__ . '/memories.php';
 
 // Brings an older database up to date so no migration file has to be run by hand. The checks run once;
 // afterwards a stored schema version skips them (one quick query instead of several on every request).
 // Raise SCHEMA_VERSION whenever the upgrade steps below change, so every database runs them once more.
-const SCHEMA_VERSION = '4';
+const SCHEMA_VERSION = '5';
 try {
     $schemaVersion = $pdo->query("SELECT setting_value FROM app_settings WHERE setting_key = 'schema_version'")->fetchColumn();
 } catch (PDOException) {
@@ -75,12 +76,16 @@ if (empty($_SESSION['csrf_token'])) {
 // Everything below needs a signed-in account (email + password + emailed code).
 $currentUser = requireSignIn($pdo);
 $isSuperadmin = $currentUser['role'] === 'superadmin';
+// Accounts (superadmin only): the actions run here, the page is drawn inside the normal layout.
+$accountMessage = null;
 if (($_GET['action'] ?? '') === 'accounts') {
     if (!$isSuperadmin) {
         header('Location: index.php');
         exit;
     }
-    accountsPage($pdo, $currentUser);
+    if ($_SERVER['REQUEST_METHOD'] === 'POST') {
+        $accountMessage = handleAccountAction($pdo, $currentUser);
+    }
 }
 
 function h(?string $value): string
@@ -150,7 +155,7 @@ if (($_GET['action'] ?? '') === 'suguan') {
     header('Location: index.php#generator');
     exit;
 }
-$allowedActions = ['list', 'form', 'settings', 'suguan_data', 'export_xlsx', 'export_sql', 'import_review', 'memories', 'memories_data', 'memory_photo', 'memory_video'];
+$allowedActions = ['list', 'form', 'settings', 'generator', 'accounts', 'suguan_data', 'export_xlsx', 'export_sql', 'import_review', 'memories', 'memories_data', 'memory_photo', 'memory_video'];
 $allowedRoles = [
     'Locale TSV Lead',
     'Locale TSV Assistant Lead',
@@ -298,7 +303,7 @@ if ($action === 'memories') {
     clearAbandonedVideos($pdo);
 }
 if ($action === 'memories_data') {
-    sendJson(['posts' => memoriesPayload($pdo)]);
+    sendJson(['posts' => memoriesPayload($pdo, memoryCategory($_GET['category'] ?? null))]);
 }
 $errors = [];
 $expectsJson = str_contains(
@@ -440,9 +445,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             }
             if ($postAction === 'memory_create') {
                 $statement = $pdo->prepare(
-                    'INSERT INTO memory_posts (taken_on, caption, created_at, updated_at) VALUES (:taken_on, :caption, NOW(), NOW())'
+                    'INSERT INTO memory_posts (taken_on, caption, category, created_at, updated_at) VALUES (:taken_on, :caption, :category, NOW(), NOW())'
                 );
-                $statement->execute(['taken_on' => memoryDate($_POST['taken_on'] ?? ''), 'caption' => memoryCaption($_POST['caption'] ?? '')]);
+                $statement->execute(['taken_on' => memoryDate($_POST['taken_on'] ?? ''), 'caption' => memoryCaption($_POST['caption'] ?? ''), 'category' => memoryCategory($_POST['category'] ?? null)]);
                 sendJson(['success' => true, 'id' => (int) $pdo->lastInsertId()]);
             }
             if ($postAction === 'memory_add_photo') {
@@ -519,6 +524,16 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             error_log('Save Suguan failed: ' . $e->getMessage());
             sendJson(['success' => false, 'message' => 'Could not save the Suguan. Please try again.'], 500);
         }
+    } elseif ($postAction === 'align_suguan') {
+        // Normalize: the week becomes the schedule last reported to the INC Directory (or the standard one).
+        try {
+            $monday = suguanWeekStart(is_string($_POST['week'] ?? null) ? $_POST['week'] : null);
+            $services = sanitizeSuguanServices(json_decode((string) ($_POST['services'] ?? ''), true));
+            $official = directoryOfficialSlots($pdo);
+            sendJson(['success' => true, 'services' => suguanNormalizeToSchedule($services, $monday, $official ?? suguanDefaultSlots()), 'official' => $official !== null]);
+        } catch (InvalidArgumentException $e) {
+            sendJson(['success' => false, 'message' => $e->getMessage()], 422);
+        }
     } elseif ($postAction === 'save_print_selection') {
         $rawSelectedForms = $_POST['print_forms'] ?? [];
         $selectedForms = [];
@@ -560,6 +575,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             exit('Could not generate the officer masterlist DOCX. Please check the PHP error log and try again.');
         }
     } elseif ($postAction === 'generate_print_forms') {
+        // A failed generate shows the problems where the form was: the pop-up, or the phone's generator page.
+        $generatorReturn = ($_GET['action'] ?? '') === 'generator' ? 'generator' : 'list';
         $rawSelectedForms = $_POST['print_forms'] ?? [];
         $selectedForms = [];
         if (is_array($rawSelectedForms)) {
@@ -707,6 +724,15 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             }
         }
 
+        $directoryForm = null;
+        if (in_array('directory_report', $selectedForms, true)) {
+            try {
+                $directoryForm = directoryFromForm();
+            } catch (InvalidArgumentException $e) {
+                $errors[] = $e->getMessage();
+            }
+        }
+
         if (!$errors) {
             try {
                 savePrintSelections($pdo, $availablePrintFormKeys, $selectedForms);
@@ -833,10 +859,14 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     ], $signatories, $templateFiles['tsv_form3']);
                 }
                 if (in_array('directory_report', $selectedForms, true)) {
+                    // With "Update data in the INC Directory" off, the report confirms what the Directory has (all Tama).
+                    $directoryBase = directoryBaseline($pdo, $reportMonth);
+                    $directoryReported = $directoryForm ?? $directoryBase;
                     $generatedDocuments["directory-report-{$monthSlug}.docx"] = generateDirectoryReportDocx(
-                        monthlyScheduleServices($pdo, $reportMonth),
+                        directoryCompareSchedule($directoryBase, $directoryReported),
+                        directoryLocationDiffers($directoryReported, $directoryBase),
+                        $directoryReported,
                         $signatories,
-                        $reportMonth,
                         $templateFiles['directory_report']
                     );
                 }
@@ -881,6 +911,18 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                         $templateFiles['forms_resumen']
                     );
                 }
+                // The Directory Report is remembered only once every form has been made.
+                if (in_array('directory_report', $selectedForms, true) && $directoryForm !== null) {
+                    try {
+                        directorySave($pdo, $reportMonth, $directoryBase, $directoryForm);
+                        $changed = array_filter(directoryCompareSchedule($directoryBase, $directoryForm), static fn(array $row): bool => $row['changed']);
+                        if ($changed && ($slots = directoryOfficialSlots($pdo))) {
+                            suguanApplyScheduleFrom($pdo, suguanWeekStart(null), $slots);
+                        }
+                    } catch (Throwable $e) {
+                        error_log('Saving the Directory Report failed: ' . $e->getMessage());
+                    }
+                }
                 if (count($generatedDocuments) === 1) {
                     $filename = array_key_first($generatedDocuments);
                     sendDownload($filename, $generatedDocuments[$filename], str_ends_with($filename, '.xlsx') ? XLSX_MIME : DOCX_MIME);
@@ -888,17 +930,17 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 sendDownload('tsv-forms.zip', zipFiles($generatedDocuments), 'application/zip');
             } catch (InvalidArgumentException $e) {
                 $errors[] = $e->getMessage();
-                $action = 'list';
+                $action = $generatorReturn;
             } catch (Throwable $e) {
                 if ($pdo->inTransaction()) {
                     $pdo->rollBack();
                 }
                 error_log('Generate weekly forms failed: ' . $e->getMessage());
                 $errors[] = 'Could not generate the selected weekly DOCX forms. Please check the PHP error log and try again.';
-                $action = 'list';
+                $action = $generatorReturn;
             }
         } else {
-            $action = 'list';
+            $action = $generatorReturn;
         }
     } elseif ($postAction === 'delete') {
         $id = filter_var($_POST['id'] ?? null, FILTER_VALIDATE_INT);
@@ -1227,7 +1269,7 @@ if ($action === 'list') {
 }
 
 $suguanPage = null;
-if ($action === 'list') {
+if ($action === 'list' || $action === 'generator') {
     $suguanPage = suguanWeekPayload($pdo, suguanWeekStart(null)) + [
         'types' => SUGUAN_TYPES,
         'officers' => array_column(
@@ -1268,6 +1310,8 @@ function icon(string $name): string
         'upload' => '<path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><path d="m17 8-5-5-5 5"/><path d="M12 3v12"/>',
         'image' => '<rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="9" cy="9" r="2"/><path d="m21 15-3.1-3.1a2 2 0 0 0-2.8 0L6 21"/>',
         'more' => '<circle cx="12" cy="12" r="1"/><circle cx="19" cy="12" r="1"/><circle cx="5" cy="12" r="1"/>',
+        'users' => '<path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M22 21v-2a4 4 0 0 0-3-3.87M16 3.13a4 4 0 0 1 0 7.75"/>',
+        'logout' => '<path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><path d="m16 17 5-5-5-5"/><path d="M21 12H9"/>',
         'database' => '<ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M3 5v14c0 1.7 4 3 9 3s9-1.3 9-3V5"/><path d="M3 12c0 1.7 4 3 9 3s9-1.3 9-3"/>',
     ];
 
@@ -1387,785 +1431,4 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && $action === 'form') {
     ]);
 }
 $isEditing = !empty($formValues['id']);
-?>
-<!doctype html>
-<html lang="en">
-<head>
-    <meta charset="utf-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>Locale TSV Secretary System</title>
-    <link rel="icon" type="image/png" href="logo.png">
-    <link rel="preconnect" href="https://fonts.googleapis.com">
-    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-    <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600;700&family=Geist+Mono:wght@400;500&display=swap">
-    <script>
-        try {
-            document.documentElement.dataset.theme = localStorage.getItem('theme') === 'light' ? 'light' : 'dark';
-        } catch {
-            document.documentElement.dataset.theme = 'dark';
-        }
-    </script>
-    <link rel="stylesheet" href="style.css?v=30">
-</head>
-<body>
-<div class="shell">
-    <aside class="sidebar">
-        <a class="team" href="index.php">
-            <span class="team-avatar" aria-hidden="true"></span>
-            <span class="team-name" title="Locale TSV Secretary System">LTSVSS</span>
-            <span class="team-badge"><?= h($signatories['locale_name'] ?: 'Locale') ?></span>
-        </a>
-        <nav class="side-nav" aria-label="Main">
-            <a class="side-link <?= $action === 'list' ? 'is-active' : '' ?>" href="index.php"><?= icon('grid') ?><span>Overview</span></a>
-            <a class="side-link <?= $action === 'form' ? 'is-active' : '' ?>" href="index.php?action=form"><?= icon('user-plus') ?><span><?= $action === 'form' && $isEditing ? 'Edit officer' : 'Add officer' ?></span></a>
-            <?php if ($action === 'list'): ?>
-                <button class="side-link" type="button" data-open-generator><?= icon('printer') ?><span>Form generator</span></button>
-            <?php else: ?>
-                <a class="side-link" href="index.php#generator"><?= icon('printer') ?><span>Form generator</span></a>
-            <?php endif; ?>
-            <a class="side-link <?= $action === 'memories' ? 'is-active' : '' ?>" href="index.php?action=memories"><?= icon('image') ?><span>TSV Memories</span></a>
-            <a class="side-link <?= $action === 'settings' ? 'is-active' : '' ?>" href="index.php?action=settings"><?= icon('pen') ?><span>Signatories</span></a>
-            <?php if ($isSuperadmin): ?>
-                <a class="side-link" href="index.php?action=accounts"><?= icon('user-plus') ?><span>Accounts</span></a>
-            <?php endif; ?>
-            <form method="post" action="index.php?action=logout" class="side-signout">
-                <input type="hidden" name="csrf_token" value="<?= h($_SESSION['csrf_token']) ?>">
-                <button class="side-link" type="submit" title="Signed in as <?= h($currentUser['email']) ?>"><?= icon('x') ?><span>Sign out</span></button>
-            </form>
-        </nav>
-        <div class="side-footer">
-            <span class="team-avatar team-avatar-small" aria-hidden="true"></span>
-            <span data-db-label data-online="<?= $usingTurso ? 'Online database' : 'Local MySQL' ?>"><?= $usingTurso ? 'Online database' : 'Local MySQL' ?></span>
-            <span class="side-footer-dot" data-db-dot title="Connected"></span>
-        </div>
-    </aside>
-
-    <div class="main">
-        <header class="topbar">
-            <a class="mobile-brand" href="index.php"><span class="team-avatar" aria-hidden="true"></span><span>LTSVSS</span></a>
-            <div class="crumbs">
-                <a href="index.php">All officers</a>
-                <?php if ($action === 'form'): ?>
-                    <span class="crumb-sep">/</span><span><?= $isEditing ? 'Edit' : 'New' ?></span>
-                <?php elseif ($action === 'settings'): ?>
-                    <span class="crumb-sep">/</span><span>Signatories</span>
-                <?php elseif ($action === 'memories'): ?>
-                    <span class="crumb-sep">/</span><span>TSV Memories</span>
-                <?php endif; ?>
-            </div>
-            <div class="topbar-actions">
-                <?php if ($action === 'list'): ?>
-                    <button class="topbar-link" type="button" data-open-generator><?= icon('printer') ?><span>Generate forms</span></button>
-                <?php endif; ?>
-                <a class="topbar-link" href="index.php?action=form"><?= icon('plus') ?><span>Add New Officer</span></a>
-                <button class="theme-toggle" type="button" data-theme-toggle aria-label="Toggle light and dark mode" title="Toggle theme">
-                    <span class="theme-icon-dark"><?= icon('moon') ?></span>
-                    <span class="theme-icon-light"><?= icon('sun') ?></span>
-                </button>
-            </div>
-        </header>
-
-        <main class="content">
-            <?php foreach ($errors as $error): ?>
-                <div class="alert alert-error"><?= h($error) ?></div>
-            <?php endforeach; ?>
-            <div id="status-feedback" class="alert alert-error" role="alert" hidden></div>
-
-            <?php if ($action === 'settings'): ?>
-                <div class="page-title">
-                    <h1>Signatories</h1>
-                    <p>Locale details and the names printed on generated forms.</p>
-                </div>
-                <section class="panel form-panel">
-                    <form method="post" action="index.php?action=settings">
-                        <input type="hidden" name="csrf_token" value="<?= h($_SESSION['csrf_token']) ?>">
-                        <input type="hidden" name="action" value="save_signatories">
-                        <div class="panel-body form-grid">
-                            <h2 class="field-wide form-section-title">Locale</h2>
-                            <label class="field">
-                                <span>Locale (Lokal)</span>
-                                <input name="locale_name" type="text" maxlength="150" value="<?= h($signatories['locale_name']) ?>">
-                            </label>
-                            <label class="field">
-                                <span>District (Distrito)</span>
-                                <input name="district_name" type="text" maxlength="150" value="<?= h($signatories['district_name']) ?>">
-                            </label>
-                            <label class="field">
-                                <span>Webex display name</span>
-                                <input name="webex_display_name" type="text" maxlength="150" placeholder="MKN-FYM Avenue" value="<?= h($signatories['webex_display_name']) ?>">
-                            </label>
-                            <h2 class="field-wide form-section-title">Signatories</h2>
-                            <label class="field">
-                                <span>Pastor</span>
-                                <input name="pastor" type="text" maxlength="150" value="<?= h($signatories['pastor']) ?>">
-                            </label>
-                            <label class="field">
-                                <span>PD Tagasubaybay</span>
-                                <input name="pd_tagasubaybay" type="text" maxlength="150" value="<?= h($signatories['pd_tagasubaybay']) ?>">
-                            </label>
-                            <label class="field">
-                                <span>PD Tagasubaybay birthday (optional)</span>
-                                <input name="pd_tagasubaybay_birthday" type="date" max="<?= h($today->format('Y-m-d')) ?>" value="<?= h($signatories['pd_tagasubaybay_birthday']) ?>">
-                            </label>
-                            <label class="field">
-                                <span>PD Tagasubaybay wedding anniversary (optional)</span>
-                                <input name="pd_tagasubaybay_wedding" type="date" max="<?= h($today->format('Y-m-d')) ?>" value="<?= h($signatories['pd_tagasubaybay_wedding']) ?>">
-                            </label>
-                            <label class="field">
-                                <span>TSV Lead</span>
-                                <input name="tsv_lead" type="text" maxlength="150" value="<?= h($signatories['tsv_lead']) ?>">
-                            </label>
-                            <label class="field">
-                                <span>Assistant TSV Lead</span>
-                                <input name="assistant_tsv_lead" type="text" maxlength="150" value="<?= h($signatories['assistant_tsv_lead']) ?>">
-                            </label>
-                            <label class="field">
-                                <span>TSV Secretary</span>
-                                <input name="tsv_secretary" type="text" maxlength="150" value="<?= h($signatories['tsv_secretary']) ?>">
-                            </label>
-                            <label class="field">
-                                <span>Tagapangasiwa ng Distrito</span>
-                                <input name="district_supervisor" type="text" maxlength="150" value="<?= h($signatories['district_supervisor']) ?>">
-                            </label>
-                            <label class="field">
-                                <span>District TSV Overseer</span>
-                                <input name="district_tsv_overseer" type="text" maxlength="150" value="<?= h($signatories['district_tsv_overseer']) ?>">
-                            </label>
-                        </div>
-                        <div class="panel-footer">
-                            <p class="muted">Used on the Suguan, checklist, Resumen, attendance, agenda and monthly reports.</p>
-                            <div class="form-actions">
-                                <a class="button button-light" href="index.php">Cancel</a>
-                                <button class="button" type="submit">Save</button>
-                            </div>
-                        </div>
-                    </form>
-                </section>
-            <?php elseif ($action === 'import_review' && is_array($_SESSION['import_preview'] ?? null)): ?>
-                <?php $preview = $_SESSION['import_preview']; $isReplace = $preview['mode'] === 'replace'; ?>
-                <div class="page-title">
-                    <a class="back-link" href="index.php"><?= icon('arrow-left') ?>Back to officers</a>
-                    <h1>Review import</h1>
-                    <p><?= h($preview['file']) ?> · <?= count($preview['records']) ?> officer records found<?= $preview['skipped'] ? ' · ' . count($preview['skipped']) . ' skipped' : '' ?><?= !empty($preview['memory_posts']) ? ' · ' . (int) $preview['memory_posts'] . ' memories with ' . (int) $preview['memory_photos'] . ' photos' . (!empty($preview['memory_videos']) ? ' and ' . (int) $preview['memory_videos'] . ' videos' : '') : '' ?></p>
-                </div>
-                <div class="confirm-box <?= $isReplace ? 'confirm-danger' : '' ?>">
-                    <strong>Are you sure?</strong>
-                    <p><?php
-                        $memoryNote = !empty($preview['memory_posts'])
-                            ? ($isReplace
-                                ? ' All current TSV Memories will also be replaced with the ' . (int) $preview['memory_posts'] . ' memories in the file.'
-                                : ' The ' . (int) $preview['memory_posts'] . ' memories in the file will be added to TSV Memories; photos and videos that are already there are skipped.')
-                            : '';
-                        if (!$preview['records']) {
-                            echo h('This file has no officer records, so the officers are left unchanged.' . $memoryNote);
-                        } else {
-                            echo h(($isReplace
-                                ? 'This will permanently delete all ' . $officerTotals['total'] . ' current officer records and replace them with the ' . count($preview['records']) . ' records below. Export an SQL backup first if you might need the current records.'
-                                : 'This will add the ' . count($preview['records']) . ' records below to the ' . $officerTotals['total'] . ' existing officer records. Blg. numbers that are already in use will be left blank.') . $memoryNote);
-                        }
-                    ?></p>
-                </div>
-                <?php if ($preview['skipped']): ?>
-                    <div class="alert alert-error">
-                        <?php foreach (array_slice($preview['skipped'], 0, 10) as $message): ?><div><?= h($message) ?></div><?php endforeach; ?>
-                    </div>
-                <?php endif; ?>
-                <section class="panel">
-                    <div class="table-wrap">
-                        <table>
-                            <thead><tr><th>Blg.</th><th>Name</th><th>Tungkulin</th><th>Status</th><th>Oath-taking</th><th>Birthday</th><th>Telegram #</th></tr></thead>
-                            <tbody>
-                                <?php foreach ($preview['records'] as $record): ?>
-                                    <tr>
-                                        <td class="mono muted"><?= h((string) ($record['masterlist_number'] ?? '')) ?></td>
-                                        <td class="name-cell"><?= h($record['name']) ?></td>
-                                        <td class="muted"><?= h($record['tungkulin']) ?></td>
-                                        <td><span class="status <?= $record['is_active'] ? 'status-active' : 'status-inactive' ?>"><?= $record['is_active'] ? 'Active' : 'Inactive' ?></span></td>
-                                        <td class="muted"><?= h(displayRecordDate($record['oath_taking_date'], $record['oath_taking_text'])) ?></td>
-                                        <td class="muted"><?= h(displayDate($record['birthday'])) ?></td>
-                                        <td class="mono"><?= h($record['contact_telegram'] ?? '') ?></td>
-                                    </tr>
-                                <?php endforeach; ?>
-                            </tbody>
-                        </table>
-                    </div>
-                    <div class="panel-footer">
-                        <form method="post" action="index.php">
-                            <input type="hidden" name="csrf_token" value="<?= h($_SESSION['csrf_token']) ?>">
-                            <input type="hidden" name="action" value="import_cancel">
-                            <button class="button button-light" type="submit">Cancel</button>
-                        </form>
-                        <form method="post" action="index.php" data-confirm="<?= $isReplace ? 'All ' . $officerTotals['total'] . ' current officer records will be deleted and replaced with ' . count($preview['records']) . ' records from the file. This cannot be undone.' : count($preview['records']) . ' officer records will be added to the masterlist.' ?>" data-confirm-title="<?= $isReplace ? 'Replace all officer records?' : 'Add these officers?' ?>" data-confirm-button="<?= $isReplace ? 'Replace all' : 'Add officers' ?>"<?= $isReplace ? '' : ' data-confirm-safe' ?>>
-                            <input type="hidden" name="csrf_token" value="<?= h($_SESSION['csrf_token']) ?>">
-                            <input type="hidden" name="action" value="import_commit">
-                            <button class="button <?= $isReplace ? 'button-danger' : '' ?>" type="submit"><?= $isReplace ? 'Yes, replace all records' : 'Yes, add ' . count($preview['records']) . ' records' ?></button>
-                        </form>
-                    </div>
-                </section>
-            <?php elseif ($action === 'memories'): ?>
-                <div class="page-title page-title-row">
-                    <div>
-                        <h1>TSV Memories</h1>
-                        <p>Photos and videos of TSV activities, kept by date. They are included in Export SQL backups.</p>
-                    </div>
-                    <div class="page-title-actions">
-                        <button class="button" type="button" data-memory-new><?= icon('plus') ?>New memory</button>
-                    </div>
-                </div>
-                <div class="memories" data-memories>
-                    <div class="memories-toolbar">
-                        <div class="segmented" role="tablist" aria-label="View">
-                            <button type="button" role="tab" data-view="timeline">Timeline</button>
-                            <button type="button" role="tab" data-view="horizontal">Horizontal</button>
-                            <button type="button" role="tab" data-view="gallery">Gallery</button>
-                            <button type="button" role="tab" data-view="calendar">Calendar</button>
-                        </div>
-                        <label class="pill">
-                            <span class="pill-label">Year</span>
-                            <select data-year-filter aria-label="Filter by year"><option value="">All years</option></select>
-                        </label>
-                    </div>
-                    <section class="memories-onthisday" data-on-this-day hidden></section>
-                    <div data-memories-view></div>
-                </div>
-                <dialog class="generator-dialog memory-composer" id="memory-composer" aria-labelledby="memory-composer-title">
-                    <form class="generator-form" data-memory-form novalidate>
-                        <div class="generator-heading">
-                            <div>
-                                <h2 id="memory-composer-title" data-composer-title>New memory</h2>
-                                <p class="muted" data-composer-hint>Add photos or videos, a caption and the date of the activity.</p>
-                            </div>
-                            <button class="dialog-close" type="button" data-composer-close aria-label="Close"><?= icon('x') ?></button>
-                        </div>
-                        <div class="generator-body composer-body">
-                            <label class="field">
-                                <span>Caption</span>
-                                <textarea name="caption" rows="3" maxlength="2000" placeholder="What happened? e.g. Paglilinis ng kapilya kasama ang mga TSV officers"></textarea>
-                            </label>
-                            <label class="field">
-                                <span>Date of the activity (optional — leave blank to use today)</span>
-                                <input name="taken_on" type="date" max="<?= h($today->format('Y-m-d')) ?>">
-                            </label>
-                            <div class="field">
-                                <span>Photos and videos</span>
-                                <div class="composer-photos" data-composer-photos></div>
-                                <label class="dropzone composer-drop" data-composer-drop>
-                                    <input class="dropzone-input" type="file" accept="image/*,video/*" multiple data-composer-files>
-                                    <span class="dropzone-icon"><?= icon('image') ?></span>
-                                    <strong>Drag &amp; drop photos or videos here</strong>
-                                    <span class="muted">or click to choose · photos are resized · videos up to <?= intdiv(MEMORY_VIDEO_MAX_BYTES, 1024 * 1024) ?> MB (MP4, WebM or MOV)</span>
-                                </label>
-                            </div>
-                            <p class="composer-status" data-composer-status role="status"></p>
-                        </div>
-                        <div class="panel-footer">
-                            <span class="muted composer-count" data-composer-count></span>
-                            <div class="form-actions">
-                                <button class="button button-light" type="button" data-composer-close>Cancel</button>
-                                <button class="button" type="submit" data-composer-submit>Post</button>
-                            </div>
-                        </div>
-                    </form>
-                </dialog>
-                <div class="lightbox" data-lightbox hidden>
-                    <button class="lightbox-close" type="button" data-lightbox-close aria-label="Close"><?= icon('x') ?></button>
-                    <button class="lightbox-nav lightbox-prev" type="button" data-lightbox-step="-1" aria-label="Previous photo"><?= icon('chevron-left') ?></button>
-                    <figure class="lightbox-figure">
-                        <img data-lightbox-image alt="">
-                        <div class="lightbox-player" data-lightbox-player hidden></div>
-                        <figcaption>
-                            <div class="lightbox-meta"><strong data-lightbox-date></strong><span class="muted" data-lightbox-count></span></div>
-                            <p data-lightbox-caption></p>
-                            <div class="lightbox-actions">
-                                <button class="button button-light" type="button" data-lightbox-edit><?= icon('pen') ?>Edit post</button>
-                                <a class="button button-light" data-lightbox-download href="#"><?= icon('download') ?>Download</a>
-                            </div>
-                        </figcaption>
-                    </figure>
-                    <button class="lightbox-nav lightbox-next" type="button" data-lightbox-step="1" aria-label="Next photo"><?= icon('chevron-right') ?></button>
-                </div>
-                <script type="application/json" id="memories-data"><?= json_encode([
-                    'posts' => memoriesPayload($pdo),
-                    'csrf' => $_SESSION['csrf_token'],
-                    'today' => $today->format('Y-m-d'),
-                    'videoMaxBytes' => MEMORY_VIDEO_MAX_BYTES,
-                ], JSON_HEX_TAG | JSON_HEX_AMP | JSON_HEX_APOS | JSON_HEX_QUOT) ?></script>
-            <?php elseif ($action === 'form'): ?>
-                <div class="page-title">
-                    <a class="back-link" href="index.php"><?= icon('arrow-left') ?>Back to officers</a>
-                    <h1><?= $isEditing ? 'Edit officer' : 'Add officer' ?></h1>
-                    <p><?= $isEditing
-                        ? 'Blg. ' . h((string) ($formValues['masterlist_number'] ?? '')) . ' · Changes appear in the next generated masterlist.'
-                        : 'The Blg. number is given automatically.' ?></p>
-                </div>
-                <section class="panel form-panel">
-                    <form method="post" action="index.php?action=form<?= $isEditing ? '&amp;id=' . rawurlencode((string) $formValues['id']) : '' ?>">
-                        <input type="hidden" name="csrf_token" value="<?= h($_SESSION['csrf_token']) ?>">
-                        <input type="hidden" name="action" value="save">
-                        <input type="hidden" name="id" value="<?= h((string) $formValues['id']) ?>">
-                        <div class="panel-body form-grid">
-                            <label class="field field-wide">
-                                <span>Name <b>*</b></span>
-                                <input name="name" type="text" maxlength="150" required value="<?= h((string) $formValues['name']) ?>" autocomplete="name">
-                            </label>
-                            <label class="field">
-                                <span>Tungkulin <b>*</b></span>
-                                <select name="tungkulin" required>
-                                    <option value="">Choose a tungkulin</option>
-                                    <?php foreach ($allowedRoles as $role): ?>
-                                        <option value="<?= h($role) ?>" <?= (string) $formValues['tungkulin'] === $role ? 'selected' : '' ?>><?= h($role) ?></option>
-                                    <?php endforeach; ?>
-                                </select>
-                            </label>
-                            <label class="field">
-                                <span>Status</span>
-                                <select name="is_active">
-                                    <option value="1" <?= (int) $formValues['is_active'] === 1 ? 'selected' : '' ?>>Active</option>
-                                    <option value="0" <?= (int) $formValues['is_active'] === 0 ? 'selected' : '' ?>>Inactive</option>
-                                </select>
-                            </label>
-                            <label class="field">
-                                <span>Date of oath-taking</span>
-                                <input name="oath_taking_date" type="text" maxlength="50" placeholder="Full date, year, or month and year" value="<?= h((string) (($formValues['oath_taking_text'] ?? '') ?: ($formValues['oath_taking_date'] ?? ''))) ?>">
-                            </label>
-                            <label class="field">
-                                <span>Date of NDA signing</span>
-                                <input name="ndi_signing_date" type="text" maxlength="50" placeholder="If not applicable, just leave empty" value="<?= h((string) (($formValues['ndi_signing_text'] ?? '') ?: ($formValues['ndi_signing_date'] ?? ''))) ?>">
-                            </label>
-                            <label class="field">
-                                <span>Birthday</span>
-                                <input name="birthday" type="date" max="<?= h($today->format('Y-m-d')) ?>" value="<?= h((string) $formValues['birthday']) ?>">
-                            </label>
-                            <label class="field">
-                                <span>Wedding anniversary (optional)</span>
-                                <input name="wedding_anniversary" type="date" max="<?= h($today->format('Y-m-d')) ?>" value="<?= h((string) ($formValues['wedding_anniversary'] ?? '')) ?>">
-                            </label>
-                            <label class="field">
-                                <span>Contact (Active) Telegram #</span>
-                                <input name="contact_telegram" type="text" maxlength="50" value="<?= h((string) ($formValues['contact_telegram'] ?? '')) ?>" autocomplete="tel">
-                            </label>
-                        </div>
-                        <div class="panel-footer">
-                            <p class="muted">Fields marked <b>*</b> are required.</p>
-                            <div class="form-actions">
-                                <a class="button button-light" href="index.php">Cancel</a>
-                                <button class="button" type="submit"><?= $isEditing ? 'Save changes' : 'Add officer' ?></button>
-                            </div>
-                        </div>
-                    </form>
-                </section>
-            <?php else: ?>
-                <div class="page-title page-title-row">
-                    <div>
-                        <h1>Officers</h1>
-                        <p>Manage officer records and generate the all-officer masterlist.</p>
-                    </div>
-                    <div class="page-title-actions">
-                        <button class="button button-light" type="button" data-open-import><?= icon('upload') ?>Import</button>
-                        <a class="button button-light" href="index.php?action=export_sql" title="Backup of the officer records and TSV Memories photos" data-download-toast="Backup Exported" data-download-message="The officer records and memories were saved as an SQL file."><?= icon('database') ?>Export SQL</a>
-                        <a class="button button-light" href="index.php?action=export_xlsx" data-download-toast="Excel Exported" data-download-message="The masterlist was saved as an Excel file."><?= icon('sheet') ?>Export Excel</a>
-                        <form method="post" action="index.php" data-download-toast="Masterlist Generated!" data-download-message="The masterlist DOCX is downloading.">
-                            <input type="hidden" name="download_token" value="">
-                            <input type="hidden" name="csrf_token" value="<?= h($_SESSION['csrf_token']) ?>">
-                            <input type="hidden" name="action" value="generate_masterlist">
-                            <button class="button" type="submit"><?= icon('download') ?>Generate masterlist DOCX</button>
-                        </form>
-                    </div>
-                </div>
-
-                <section class="stats-row" aria-label="Officer totals">
-                    <div class="stat-card">
-                        <span>Total officers</span>
-                        <strong data-total-count><?= $officerTotals['total'] ?></strong>
-                    </div>
-                    <div class="stat-card">
-                        <span><i class="dot dot-active"></i>Active</span>
-                        <strong data-active-count><?= $officerTotals['active'] ?></strong>
-                    </div>
-                    <div class="stat-card">
-                        <span><i class="dot dot-inactive"></i>Inactive</span>
-                        <strong data-inactive-count><?= $officerTotals['inactive'] ?></strong>
-                    </div>
-                </section>
-
-                <section class="panel birthdays" aria-label="Birthdays this month">
-                    <div class="birthdays-head">
-                        <?= icon('gift') ?>
-                        <strong>Birthdays in <?= h($today->format('F')) ?></strong>
-                        <span class="muted"><?= count($birthdays) ?> <?= count($birthdays) === 1 ? 'officer' : 'officers' ?></span>
-                    </div>
-                    <?php if ($birthdays): ?>
-                        <ul class="birthday-list">
-                            <?php foreach ($birthdays as $birthday): ?>
-                                <li class="<?= $birthday['days'] === 0 ? 'is-today' : ($birthday['days'] < 0 ? 'is-past' : '') ?>">
-                                    <span class="birthday-date mono"><?= h($birthday['date']) ?></span>
-                                    <span class="birthday-name"><?= h($birthday['name']) ?></span>
-                                    <span class="birthday-when"><?php
-                                        if ($birthday['days'] === 0) {
-                                            echo 'Today · turns ' . $birthday['age'];
-                                        } elseif ($birthday['days'] > 0) {
-                                            echo 'In ' . $birthday['days'] . ($birthday['days'] === 1 ? ' day' : ' days') . ' · turns ' . $birthday['age'];
-                                        } else {
-                                            echo 'Turned ' . $birthday['age'];
-                                        }
-                                    ?></span>
-                                </li>
-                            <?php endforeach; ?>
-                        </ul>
-                    <?php else: ?>
-                        <p class="birthday-empty muted">No active officers have a birthday this month.</p>
-                    <?php endif; ?>
-                </section>
-
-                <form class="filter-bar" action="index.php" method="get" data-filter-form>
-                    <label class="find">
-                        <?= icon('search') ?>
-                        <input type="search" name="search" placeholder="Find by name or tungkulin..." value="<?= h($search ?? '') ?>" aria-label="Search officers">
-                        <kbd>F</kbd>
-                    </label>
-                    <label class="pill">
-                        <?= icon('filter') ?>
-                        <span class="pill-label">Status</span>
-                        <select name="status" aria-label="Filter by status" data-status-filter="<?= h($statusFilter) ?>">
-                            <option value="all" <?= $statusFilter === 'all' ? 'selected' : '' ?>>All</option>
-                            <option value="active" <?= $statusFilter === 'active' ? 'selected' : '' ?>>Active</option>
-                            <option value="inactive" <?= $statusFilter === 'inactive' ? 'selected' : '' ?>>Inactive</option>
-                        </select>
-                    </label>
-                    <?php if (!empty($search)): ?>
-                        <span class="pill pill-static"><span class="pill-label">Search</span><?= h($search) ?></span>
-                    <?php endif; ?>
-                    <?php if (!empty($search) || $statusFilter !== 'all'): ?>
-                        <a class="pill pill-clear" href="index.php"><?= icon('x') ?>Clear</a>
-                    <?php endif; ?>
-                    <button class="visually-hidden" type="submit">Search</button>
-                </form>
-
-                <section class="panel">
-                    <div class="table-wrap">
-                        <table class="officers-table">
-                            <thead>
-                                <tr>
-                                    <th>Blg.</th>
-                                    <th>Name</th>
-                                    <th>Tungkulin</th>
-                                    <th>Status</th>
-                                    <th>Oath-taking</th>
-                                    <th>NDA signing</th>
-                                    <th>Birthday</th>
-                                    <th>Telegram #</th>
-                                    <th class="actions-column"><span class="visually-hidden">Actions</span></th>
-                                </tr>
-                            </thead>
-                            <tbody data-officers-body>
-                                <?php if (!$officers): ?>
-                                    <tr><td class="empty-state" colspan="9"><?php
-                                        if ($statusFilter === 'active') {
-                                            echo !empty($search) ? 'No active officers match your search.' : 'No active officers found.';
-                                        } elseif ($statusFilter === 'inactive') {
-                                            echo !empty($search) ? 'No inactive officers match your search.' : 'No inactive officers found.';
-                                        } else {
-                                            echo !empty($search) ? 'No officers match your search.' : 'No officer records yet. Add an officer to get started.';
-                                        }
-                                    ?></td></tr>
-                                <?php else: ?>
-                                    <?php foreach ($officers as $officer): ?>
-                                        <tr data-officer-row data-active="<?= $officer['is_active'] ? '1' : '0' ?>">
-                                            <td class="mono muted cell-blg"><?= h((string) ($officer['masterlist_number'] ?? '')) ?></td>
-                                            <td class="name-cell"><?= h($officer['name']) ?></td>
-                                            <td class="muted cell-role"><?= h($officer['tungkulin']) ?></td>
-                                            <td class="cell-status">
-                                                <form method="post" action="index.php" class="status-toggle-form" data-status-toggle>
-                                                    <input type="hidden" name="csrf_token" value="<?= h($_SESSION['csrf_token']) ?>">
-                                                    <input type="hidden" name="action" value="toggle_status">
-                                                    <input type="hidden" name="id" value="<?= h((string) $officer['id']) ?>">
-                                                    <button class="status status-toggle <?= $officer['is_active'] ? 'status-active' : 'status-inactive' ?>" type="submit" aria-label="Set <?= h($officer['name']) ?> to <?= $officer['is_active'] ? 'inactive' : 'active' ?>" title="Click to change status"><?= $officer['is_active'] ? 'Active' : 'Inactive' ?></button>
-                                                </form>
-                                            </td>
-                                            <?php $cells = [
-                                                ['muted', 'Oath-taking', displayRecordDate($officer['oath_taking_date'], $officer['oath_taking_text'])],
-                                                ['muted', 'NDA signing', displayRecordDate($officer['ndi_signing_date'], $officer['ndi_signing_text'])],
-                                                ['muted', 'Birthday', displayDate($officer['birthday'])],
-                                                ['mono', 'Telegram #', (string) ($officer['contact_telegram'] ?? '')],
-                                            ]; ?>
-                                            <?php foreach ($cells as [$cellClass, $cellLabel, $cellValue]): ?>
-                                                <td class="<?= $cellClass ?> cell-detail" data-label="<?= h($cellLabel) ?>"<?= $cellValue === '' || $cellValue === '—' ? ' data-empty' : '' ?>><?= h($cellValue) ?></td>
-                                            <?php endforeach; ?>
-                                            <td class="row-actions">
-                                                <a class="row-icon" href="index.php?action=form&amp;id=<?= h((string) $officer['id']) ?>" aria-label="Edit <?= h($officer['name']) ?>" title="Edit"><?= icon('pen') ?></a>
-                                                <form method="post" action="index.php" data-confirm="<?= h($officer['name']) ?> will be removed from the masterlist. This cannot be undone." data-confirm-title="Delete this officer?" data-confirm-button="Delete">
-                                                    <input type="hidden" name="csrf_token" value="<?= h($_SESSION['csrf_token']) ?>">
-                                                    <input type="hidden" name="action" value="delete">
-                                                    <input type="hidden" name="id" value="<?= h((string) $officer['id']) ?>">
-                                                    <button class="row-icon row-icon-danger" type="submit" aria-label="Delete <?= h($officer['name']) ?>" title="Delete"><?= icon('trash') ?></button>
-                                                </form>
-                                            </td>
-                                        </tr>
-                                    <?php endforeach; ?>
-                                <?php endif; ?>
-                            </tbody>
-                        </table>
-                    </div>
-                </section>
-
-                <dialog class="generator-dialog import-dialog" id="import-dialog" aria-labelledby="import-title">
-                    <form method="post" action="index.php" enctype="multipart/form-data" class="generator-form">
-                        <input type="hidden" name="csrf_token" value="<?= h($_SESSION['csrf_token']) ?>">
-                        <input type="hidden" name="action" value="import_preview">
-                        <div class="generator-heading">
-                            <div>
-                                <h2 id="import-title">Import officer records</h2>
-                                <p class="muted">Upload a .sql / .mysql backup (from Export SQL or phpMyAdmin). You'll review the records before anything changes.</p>
-                            </div>
-                            <button class="dialog-close" type="button" data-close-dialog aria-label="Close"><?= icon('x') ?></button>
-                        </div>
-                        <div class="generator-body">
-                            <label class="dropzone" data-dropzone>
-                                <input class="dropzone-input" name="import_file" type="file" accept=".sql,.mysql,.txt" required data-import-file>
-                                <span class="dropzone-icon"><?= icon('upload') ?></span>
-                                <strong data-dropzone-title>Drag &amp; drop your backup here</strong>
-                                <span class="muted" data-dropzone-hint data-max-bytes="<?= importMaxBytes() ?>">or click to browse · .sql or .mysql, up to <?= h(formatBytes(importMaxBytes())) ?></span>
-                            </label>
-                            <fieldset class="generator-group import-modes">
-                                <legend>Import mode</legend>
-                                <label class="generator-option">
-                                    <input type="radio" name="import_mode" value="add" checked>
-                                    <span><strong>Add to existing records</strong><br><small class="muted">Keeps the current officers and adds the ones from the file.</small></span>
-                                </label>
-                                <label class="generator-option">
-                                    <input type="radio" name="import_mode" value="replace">
-                                    <span><strong>Replace all records</strong><br><small class="muted">Deletes the current officers and restores the file's records.</small></span>
-                                </label>
-                            </fieldset>
-                        </div>
-                        <div class="panel-footer">
-                            <span></span>
-                            <div class="form-actions">
-                                <button class="button button-light" type="button" data-close-dialog>Cancel</button>
-                                <button class="button" type="submit">Review import</button>
-                            </div>
-                        </div>
-                    </form>
-                </dialog>
-                <dialog class="generator-dialog" id="print-generator" aria-labelledby="generator-title">
-                    <form method="post" action="index.php" class="generator-form" data-download-toast="Form Generated!" data-download-message="Your forms are downloading." data-download-close>
-                        <input type="hidden" name="csrf_token" value="<?= h($_SESSION['csrf_token']) ?>">
-                        <input type="hidden" name="action" value="generate_print_forms">
-                        <input type="hidden" name="download_token" value="">
-                        <div class="generator-heading">
-                            <div>
-                                <h2 id="generator-title">Generate forms</h2>
-                                <p class="muted">Choose the forms to print. Tick Suguan to plan the week's operators; the checklist and Resumen use the same week.</p>
-                            </div>
-                            <button class="dialog-close" type="button" data-close-generator aria-label="Close"><?= icon('x') ?></button>
-                        </div>
-                        <div class="generator-body">
-                            <div class="generator-groups">
-                                <?php foreach ($printForms as $frequency => $forms): ?>
-                                    <fieldset class="generator-group">
-                                        <legend><?= ucfirst($frequency) ?></legend>
-                                        <?php foreach ($forms as $formKey => $formLabel): ?>
-                                            <?php $formAvailable = in_array($formKey, $availablePrintFormKeys, true); ?>
-                                            <label class="generator-option <?= $formAvailable ? '' : 'generator-option-unavailable' ?>">
-                                                <input type="checkbox" name="print_forms[]" value="<?= h($formKey) ?>" <?= $printSelections[$formKey] && $formAvailable ? 'checked' : '' ?> <?= $formAvailable ? '' : 'disabled' ?>>
-                                                <span><?= h($formLabel) ?><?php if ($formKey === 'resumen_form6'): ?><small class="option-note">Half sheet (8.5 × 7 in), one week. Includes a salaysay letter for each Pagsamba with fewer than 3 operators.</small><?php endif; ?></span>
-                                                <?php if (!$formAvailable): ?><em class="tag">Soon</em><?php endif; ?>
-                                            </label>
-                                        <?php endforeach; ?>
-                                    </fieldset>
-                                <?php endforeach; ?>
-                            </div>
-                            <fieldset class="generator-group suguan-builder" data-suguan-builder hidden>
-                                <legend>Suguan</legend>
-                                <input type="hidden" name="suguan_week" value="<?= h($suguanPage['week']) ?>" data-suguan-week-input>
-                                <div class="suguan-builder-head">
-                                    <div class="week-nav">
-                                        <button class="icon-button" type="button" data-week-step="previous" aria-label="Previous week"><?= icon('chevron-left') ?></button>
-                                        <div class="week-label">
-                                            <strong data-week-label><?= h($suguanPage['label']) ?></strong>
-                                            <span class="muted" data-week-meta>Week <?= h($suguanPage['weekNumber']) ?> · This week</span>
-                                        </div>
-                                        <button class="icon-button" type="button" data-week-step="next" aria-label="Next week"><?= icon('chevron-right') ?></button>
-                                        <button class="pill pill-static" type="button" data-week-step="current" hidden>This week</button>
-                                    </div>
-                                    <div class="suguan-toolbar">
-                                        <button class="button button-light" type="button" data-suguan-rotate title="Computer → Audio, Audio → Video, Video → Computer"><?= icon('rotate') ?>Auto rotate</button>
-                                        <button class="button button-light" type="button" data-suguan-sort><?= icon('sort') ?>Sort</button>
-                                        <button class="button button-light" type="button" data-suguan-add><?= icon('plus') ?>Add service</button>
-                                        <span class="save-state" data-save-state><?= $suguanPage['saved'] ? 'Saved' : 'Not saved yet' ?></span>
-                                    </div>
-                                </div>
-                                <section class="officer-picker" aria-label="Active officers">
-                                    <div class="officer-picker-head">
-                                        <strong>Officers</strong>
-                                        <span class="muted" data-picker-hint>Pick a name, then click a role below.</span>
-                                    </div>
-                                    <div class="officer-chips" data-officer-chips></div>
-                                </section>
-                                <div class="service-list" data-service-list></div>
-                                <script type="application/json" id="suguan-data"><?= json_encode($suguanPage + [
-                                    'csrf' => $_SESSION['csrf_token'],
-                                ], JSON_HEX_TAG | JSON_HEX_AMP | JSON_HEX_APOS | JSON_HEX_QUOT) ?></script>
-                            </fieldset>
-                            <div class="form-grid meeting-fields" data-meeting-fields>
-                                <label class="field">
-                                    <span>Petsa at Oras ng Weekly Pulong</span>
-                                    <input name="meeting_datetime" type="text" maxlength="150" required placeholder="Sunday, 3:00 PM" value="<?= h($weeklyMeeting['datetime']) ?>">
-                                </label>
-                                <label class="field">
-                                    <span>Dako ng Pulong</span>
-                                    <input name="meeting_venue" type="text" maxlength="150" required placeholder="Kapilya" value="<?= h($weeklyMeeting['venue']) ?>">
-                                </label>
-                            </div>
-                            <fieldset class="generator-group agenda-fields" data-agenda-fields hidden>
-                                <legend>Meeting agenda details</legend>
-                                <div class="form-grid">
-                                    <label class="field">
-                                        <span>Unang Panalangin (optional)</span>
-                                        <input name="first_prayer" type="text" maxlength="150" value="<?= h($agendaValues['first_prayer']) ?>">
-                                    </label>
-                                    <label class="field">
-                                        <span>Huling Panalangin (optional)</span>
-                                        <input name="last_prayer" type="text" maxlength="150" value="<?= h($agendaValues['last_prayer']) ?>">
-                                    </label>
-                                    <label class="field field-wide">
-                                        <span>Pagpapayo/Lektura — name (optional)</span>
-                                        <input name="lecture" type="text" maxlength="150" value="<?= h($agendaValues['lecture']) ?>">
-                                    </label>
-                                    <label class="field field-wide">
-                                        <span>Agenda — first line is the topic title, the lines under it are its points; leave a blank line between topics.</span>
-                                        <textarea name="agenda_topics" rows="8" maxlength="6000" placeholder="Paghahanda sa Pagsamba ng Linggo&#10;Pagtiyak na naka-charge ang mga camera&#10;Pagsusuri ng internet connection&#10;&#10;Recruitment ng bagong maytungkulin&#10;Pagpili ng mga kandidato"><?= h($agendaValues['topics']) ?></textarea>
-                                    </label>
-                                </div>
-                            </fieldset>
-                            <fieldset class="generator-group agenda-fields" data-forms-resumen-fields data-shown-for="forms_resumen" hidden>
-                                <legend>Forms Resumen</legend>
-                                <label class="field field-wide">
-                                    <span>Karagdagang forms? (optional, one per line)</span>
-                                    <textarea name="extra_forms" rows="4" maxlength="3000" placeholder="Initial report: HVO Training with picture attachment"><?= h($savedExtraForms) ?></textarea>
-                                </label>
-                            </fieldset>
-                            <fieldset class="generator-group agenda-fields" data-monthly-fields hidden>
-                                <legend>Monthly reports</legend>
-                                <div class="form-grid">
-                                    <label class="field">
-                                        <span>Buwan (month covered)</span>
-                                        <input name="report_month" type="month" value="<?= h($agendaValues['report_month'] ?: $today->format('Y-m')) ?>">
-                                    </label>
-                                    <label class="field" data-only-for="monthly_attendance">
-                                        <span>Petsa ng Monthly Pulong</span>
-                                        <input name="monthly_date" type="text" maxlength="150" placeholder="<?= h($today->format('F j, Y')) ?>" value="<?= h($agendaValues['monthly_date']) ?>" data-required>
-                                    </label>
-                                    <?php
-                                    // After a failed submit the posted rows come back; otherwise the last generated list is shown.
-                                    $recruitRows = [];
-                                    if (isset($_POST['recruit_count'])) {
-                                        foreach ((array) ($_POST['recruit_name'] ?? []) as $index => $name) {
-                                            $recruitRows[] = array_map(
-                                                static fn(mixed $value): string => is_string($value) ? $value : '',
-                                                [$name, $_POST['recruit_birthday'][$index] ?? '', $_POST['recruit_wedding'][$index] ?? '']
-                                            );
-                                        }
-                                        $recruitCountValue = (int) $_POST['recruit_count'];
-                                    } else {
-                                        foreach (json_decode($savedRecruits, true) ?: [] as $savedRecruit) {
-                                            if (is_array($savedRecruit)) {
-                                                $recruitRows[] = array_map('strval', array_pad(array_values($savedRecruit), 3, ''));
-                                            }
-                                        }
-                                        $recruitCountValue = count($recruitRows);
-                                    }
-                                    ?>
-                                    <label class="field" data-only-for="monthly_attendance">
-                                        <span>Bilang ng recruits</span>
-                                        <input name="recruit_count" type="number" min="0" max="20" step="1" value="<?= max(0, min(20, $recruitCountValue)) ?>">
-                                    </label>
-                                    <div class="field field-wide row-list" data-only-for="monthly_attendance" data-recruit-list>
-                                        <span>Recruits</span>
-                                        <div class="row-list-row recruit-row row-list-head" aria-hidden="true">
-                                            <span>Pangalan</span><span>Birthday (optional)</span><span>Wedding (optional)</span>
-                                        </div>
-                                        <div data-rows="recruit_count" data-max-rows="20">
-                                            <?php foreach ($recruitRows ?: [['', '', '']] as [$recruitName, $recruitBirthday, $recruitWedding]): ?>
-                                                <div class="row-list-row recruit-row" data-row>
-                                                    <input name="recruit_name[]" type="text" maxlength="150" aria-label="Pangalan ng recruit" value="<?= h($recruitName) ?>" data-required>
-                                                    <input name="recruit_birthday[]" type="date" max="<?= h($today->format('Y-m-d')) ?>" aria-label="Birthday" value="<?= h($recruitBirthday) ?>">
-                                                    <input name="recruit_wedding[]" type="date" max="<?= h($today->format('Y-m-d')) ?>" aria-label="Wedding date" value="<?= h($recruitWedding) ?>">
-                                                </div>
-                                            <?php endforeach; ?>
-                                        </div>
-                                    </div>
-                                    <label class="field" data-only-for="tsv_form3">
-                                        <span>Webex display name (optional)</span>
-                                        <input name="webex_display_name" type="text" maxlength="150" placeholder="<?= h($signatories['webex_display_name'] ?: 'Set it under Signatories') ?>" value="<?= h($postedWebexName) ?>">
-                                    </label>
-                                    <label class="field" data-only-for="tsv_form3">
-                                        <span>Bilang kung ilang beses ginamit</span>
-                                        <input name="webex_count" type="number" min="0" step="1" value="<?= h($agendaValues['webex_count'] !== '' ? $agendaValues['webex_count'] : '0') ?>">
-                                    </label>
-                                    <label class="field field-wide" data-only-for="tsv_form3" data-webex-when="unused">
-                                        <span>Kung hindi ginamit, ano ang dahilan?</span>
-                                        <input name="webex_reason" type="text" maxlength="250" placeholder="Wala pong aktibidad" value="<?= h($agendaValues['webex_reason']) ?>">
-                                    </label>
-                                    <?php
-                                    $activityRows = [];
-                                    foreach ((array) ($_POST['activity_name'] ?? []) as $index => $name) {
-                                        $activityRows[] = [
-                                            is_string($name) ? $name : '',
-                                            is_string($_POST['activity_purpose'][$index] ?? null) ? $_POST['activity_purpose'][$index] : '',
-                                            is_string($_POST['activity_date'][$index] ?? null) ? $_POST['activity_date'][$index] : '',
-                                        ];
-                                    }
-                                    $activityRows = $activityRows ?: [['', '', '']];
-                                    ?>
-                                    <div class="field field-wide row-list activity-list" data-only-for="tsv_form3" data-webex-when="used">
-                                        <span>Mga isinagawang aktibidad ng lokal — one row per use of Webex</span>
-                                        <div class="row-list-row activity-row row-list-head" aria-hidden="true">
-                                            <span>Aktibidad ng Lokal</span><span>Layunin</span><span>Petsa na Isinagawa</span>
-                                        </div>
-                                        <div data-rows="webex_count" data-max-rows="12">
-                                            <?php foreach ($activityRows as [$activityName, $activityPurpose, $activityDate]): ?>
-                                                <div class="row-list-row activity-row" data-row>
-                                                    <input name="activity_name[]" type="text" maxlength="250" aria-label="Aktibidad ng Lokal" value="<?= h($activityName) ?>" data-required>
-                                                    <input name="activity_purpose[]" type="text" maxlength="250" aria-label="Layunin" value="<?= h($activityPurpose) ?>" data-required>
-                                                    <input name="activity_date[]" type="date" aria-label="Petsa na Isinagawa" value="<?= h($activityDate) ?>" data-required>
-                                                </div>
-                                            <?php endforeach; ?>
-                                        </div>
-                                    </div>
-                                </div>
-                                <p class="field-note">TSV Form 3 counts and the Directory Report schedule are filled from the officer records and the Suguan.</p>
-                            </fieldset>
-                            <p class="generator-note">Forms marked <em class="tag">Soon</em> need their DOCX templates added before they can be generated.</p>
-                        </div>
-                        <div class="panel-footer">
-                            <span></span>
-                            <div class="form-actions">
-                                <button class="button button-light" type="button" data-close-generator>Cancel</button>
-                                <button class="button" type="submit">Generate</button>
-                            </div>
-                        </div>
-                    </form>
-                </dialog>
-            <?php endif; ?>
-            <footer class="page-footer">TSV Officer Masterlist · Records are stored in your local MySQL database.</footer>
-        </main>
-    </div>
-</div>
-<dialog class="confirm-dialog" id="confirm-dialog" aria-labelledby="confirm-title">
-    <div class="confirm-icon" data-confirm-icon><?= icon('trash') ?></div>
-    <h2 id="confirm-title" data-confirm-title>Are you sure?</h2>
-    <p data-confirm-message></p>
-    <div class="form-actions">
-        <button class="button button-light" type="button" data-confirm-cancel>Cancel</button>
-        <button class="button button-danger" type="button" data-confirm-ok>Delete</button>
-    </div>
-</dialog>
-<div class="toast-region" data-toasts aria-live="polite"></div>
-<?php if ($toast): ?><script type="application/json" id="toast-data"><?= json_encode($toast, JSON_HEX_TAG | JSON_HEX_AMP | JSON_HEX_APOS | JSON_HEX_QUOT) ?></script><?php endif; ?>
-<script src="datepicker.js?v=3"></script>
-<script src="app.js?v=30"></script>
-<?php if ($action === 'list'): ?><script src="suguan.js?v=30"></script><?php endif; ?>
-<?php if ($action === 'memories'): ?><script src="player.js?v=3"></script><script src="memories.js?v=30"></script><?php endif; ?>
-</body>
-</html>
+require __DIR__ . '/view.php';

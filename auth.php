@@ -479,10 +479,17 @@ function requireSignIn(PDO $pdo): array
             <form method="post" action="index.php" class="auth-form">
                 <input type="hidden" name="csrf_token" value="{$csrf}">
                 <input type="hidden" name="auth_step" value="code">
-                <label class="field"><span>Sign-in code</span>
-                    <input name="code" inputmode="numeric" autocomplete="one-time-code" pattern="[0-9 ]{6,7}" maxlength="7" required autofocus>
-                </label>
-                <button class="button" type="submit">Verify</button>
+                <input type="hidden" name="code" data-otp-value>
+                <div class="otp" data-otp role="group" aria-label="6-digit sign-in code">
+                    <input class="otp-box" inputmode="numeric" autocomplete="one-time-code" maxlength="6" aria-label="Digit 1" autofocus>
+                    <input class="otp-box" inputmode="numeric" maxlength="1" aria-label="Digit 2">
+                    <input class="otp-box" inputmode="numeric" maxlength="1" aria-label="Digit 3">
+                    <span class="otp-gap" aria-hidden="true"></span>
+                    <input class="otp-box" inputmode="numeric" maxlength="1" aria-label="Digit 4">
+                    <input class="otp-box" inputmode="numeric" maxlength="1" aria-label="Digit 5">
+                    <input class="otp-box" inputmode="numeric" maxlength="1" aria-label="Digit 6">
+                </div>
+                <button class="button auth-submit" type="submit" data-otp-submit disabled>Verify</button>
             </form>
             <form method="post" action="index.php" class="auth-form">
                 <input type="hidden" name="csrf_token" value="{$csrf}">
@@ -575,22 +582,97 @@ function authPage(string $title, callable $body): never
     </script>
     <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600;700&family=Geist+Mono:wght@400;500&display=swap">
     <link rel="stylesheet" href="style.css?v=30">
+    <link rel="icon" type="image/png" href="logo.png">
     <style>
-        .auth-wrap { min-height: 100vh; display: grid; place-items: center; padding: 24px; }
-        .auth-card { width: min(420px, 100%); padding: 28px; display: grid; gap: 16px; }
-        .auth-card h1 { margin: 0; font-size: 1.4rem; }
+        .auth-wrap {
+            min-height: 100vh; display: grid; place-items: center; padding: 32px 20px;
+            background:
+                radial-gradient(900px 500px at 50% -10%, rgba(251, 186, 36, 0.10), transparent 60%),
+                radial-gradient(600px 400px at 100% 110%, rgba(251, 186, 36, 0.05), transparent 60%);
+        }
+        .auth-card {
+            width: min(420px, 100%); padding: 36px 34px 30px; display: grid; gap: 18px;
+            border-radius: 18px; box-shadow: 0 30px 80px -30px rgba(0, 0, 0, 0.55), 0 0 0 1px rgba(255, 255, 255, 0.03) inset;
+            animation: auth-in 420ms cubic-bezier(.2, .8, .2, 1) both;
+        }
+        @keyframes auth-in { from { opacity: 0; transform: translateY(10px) scale(.99); } to { opacity: 1; transform: none; } }
+        .auth-brand { display: flex; align-items: center; gap: 12px; }
+        .auth-brand .team-avatar { width: 34px; height: 34px; }
+        .auth-brand strong { display: block; font-size: 15px; letter-spacing: .06em; }
+        .auth-brand small { display: block; color: var(--muted, #8a8a8a); font-size: 12px; }
+        .auth-rule { height: 1px; background: linear-gradient(90deg, transparent, rgba(251, 186, 36, .45), transparent); margin: 2px 0; }
+        .auth-card h1 { margin: 4px 0 0; font-size: 1.55rem; font-weight: 600; letter-spacing: -0.01em; }
+        .auth-card > p.muted { margin: -8px 0 0; line-height: 1.55; }
         .auth-form { display: grid; gap: 14px; }
-        .auth-brand { display: flex; align-items: center; gap: 10px; font-weight: 600; }
+        .auth-submit { height: 44px; font-weight: 600; }
+        .otp { display: flex; justify-content: center; align-items: center; gap: 10px; margin: 6px 0 4px; }
+        .otp-gap { width: 6px; height: 2px; border-radius: 2px; background: var(--border, #333); }
+        .otp-box {
+            width: 48px; height: 58px; padding: 0; text-align: center; font: 600 24px/1 'Geist Mono', ui-monospace, monospace;
+            border-radius: 12px; border: 1px solid var(--border, #2a2a2a); background: var(--surface, rgba(255,255,255,.02)); color: inherit;
+            caret-color: #FBBA24; transition: border-color .15s, box-shadow .15s, transform .15s;
+        }
+        .otp-box:focus { outline: none; border-color: #FBBA24; box-shadow: 0 0 0 4px rgba(251, 186, 36, .18); transform: translateY(-1px); }
+        .otp-box.is-filled { border-color: rgba(251, 186, 36, .55); }
+        .otp.is-error .otp-box { border-color: #e5484d; animation: otp-shake .35s; }
+        @keyframes otp-shake { 25% { transform: translateX(-4px); } 75% { transform: translateX(4px); } }
+        @media (max-width: 400px) { .otp { gap: 6px; } .otp-box { width: 42px; height: 52px; font-size: 21px; } }
     </style>
 </head>
 <body>
 <div class="auth-wrap">
     <div class="panel auth-card">
-        <div class="auth-brand"><span class="team-avatar" aria-hidden="true"></span><span>LTSVSS</span></div>
+        <div class="auth-brand"><span class="team-avatar" aria-hidden="true"></span><span><strong>LTSVSS</strong><small>Locale TSV Secretary System</small></span></div>
+        <div class="auth-rule"></div>
         <h1><?= h($title) ?></h1>
         <?php $body(); ?>
     </div>
 </div>
+<script>
+// The 6 code boxes: typing moves to the next box, Backspace goes back, and pasting the whole code fills them all.
+(() => {
+    const group = document.querySelector('[data-otp]');
+    if (!group) return;
+    const boxes = [...group.querySelectorAll('.otp-box')];
+    const value = document.querySelector('[data-otp-value]');
+    const submit = document.querySelector('[data-otp-submit]');
+    const form = group.closest('form');
+    const sync = () => {
+        const code = boxes.map((b) => b.value).join('');
+        value.value = code;
+        boxes.forEach((b) => b.classList.toggle('is-filled', b.value !== ''));
+        submit.disabled = code.length !== 6;
+        if (code.length === 6 && !form.dataset.sent) {
+            form.dataset.sent = '1';
+            submit.textContent = 'Verifying…';
+            form.submit();
+        }
+    };
+    const fill = (start, digits) => {
+        digits.split('').forEach((d, i) => { if (boxes[start + i]) boxes[start + i].value = d; });
+        boxes[Math.min(start + digits.length, boxes.length - 1)].focus();
+        sync();
+    };
+    boxes.forEach((box, i) => {
+        box.addEventListener('input', () => {
+            const digits = box.value.replace(/\D/g, '');
+            box.value = '';
+            if (digits) fill(i, digits.slice(0, boxes.length - i)); else sync();
+        });
+        box.addEventListener('keydown', (e) => {
+            if (e.key === 'Backspace' && !box.value && i > 0) { boxes[i - 1].value = ''; boxes[i - 1].focus(); sync(); e.preventDefault(); }
+            if (e.key === 'ArrowLeft' && i > 0) boxes[i - 1].focus();
+            if (e.key === 'ArrowRight' && i < boxes.length - 1) boxes[i + 1].focus();
+        });
+        box.addEventListener('paste', (e) => {
+            const digits = (e.clipboardData || window.clipboardData).getData('text').replace(/\D/g, '').slice(0, 6);
+            if (digits) { e.preventDefault(); boxes.forEach((b) => (b.value = '')); fill(0, digits); }
+        });
+        box.addEventListener('focus', () => box.select());
+    });
+    if (document.querySelector('.alert-error')) group.classList.add('is-error');
+})();
+</script>
 </body>
 </html>
     <?php
@@ -683,12 +765,9 @@ function handleAccountAction(PDO $pdo, array $me): array
     return ['error', 'Unknown action.'];
 }
 
-function accountsPage(PDO $pdo, array $me): never
+/** The Accounts page content (drawn inside the site's layout). */
+function accountsBody(PDO $pdo, array $me, ?array $message): string
 {
-    $message = null;
-    if ($_SERVER['REQUEST_METHOD'] === 'POST') {
-        $message = handleAccountAction($pdo, $me);
-    }
     $users = $pdo->query('SELECT id, email, name, role, status, password_hash IS NOT NULL AS has_password, created_at, last_login_at FROM app_users ORDER BY role DESC, name')->fetchAll();
     $sessionCounts = [];
     $statement = $pdo->prepare('SELECT user_id, COUNT(*) AS n FROM app_sessions WHERE expires_at > :now AND user_id > 0 GROUP BY user_id');
@@ -696,79 +775,49 @@ function accountsPage(PDO $pdo, array $me): never
     foreach ($statement->fetchAll() as $row) {
         $sessionCounts[(int) $row['user_id']] = (int) $row['n'];
     }
-    authPageWide('Accounts', static function () use ($users, $sessionCounts, $message, $me): void {
-        $csrf = h($_SESSION['csrf_token']);
-        if ($message) {
-            echo '<div class="alert ' . ($message[0] === 'error' ? 'alert-error' : 'alert-success') . '">' . h($message[1]) . '</div>';
-        }
-        echo <<<HTML
-        <form method="post" action="index.php?action=accounts" class="account-create">
+    $csrf = h($_SESSION['csrf_token']);
+    $out = '';
+    if ($message) {
+        $out .= '<div class="alert ' . ($message[0] === 'error' ? 'alert-error' : 'alert-success') . '">' . h($message[1]) . '</div>';
+    }
+    $out .= <<<HTML
+    <section class="panel form-panel">
+        <form method="post" action="index.php?action=accounts">
             <input type="hidden" name="csrf_token" value="{$csrf}">
             <input type="hidden" name="account_op" value="create">
-            <label class="field"><span>Name</span><input name="name" maxlength="150" required></label>
-            <label class="field"><span>Email</span><input name="email" type="email" maxlength="200" required></label>
-            <button class="button" type="submit">Add account</button>
+            <div class="panel-body form-grid">
+                <h2 class="field-wide form-section-title">Add an account</h2>
+                <label class="field"><span>Name</span><input name="name" maxlength="150" required></label>
+                <label class="field"><span>Email</span><input name="email" type="email" maxlength="200" required></label>
+            </div>
+            <div class="panel-footer"><span class="muted">They get an email to choose their password.</span><div class="form-actions"><button class="button" type="submit">Add account</button></div></div>
         </form>
-        <p class="muted">The new member gets an email with a link to choose their password. Passwords are never shown to anyone.</p>
-        <div class="table-wrap"><table class="accounts">
-            <thead><tr><th>Name</th><th>Email</th><th>Role</th><th>Status</th><th>Last sign-in</th><th>Signed in now</th><th></th></tr></thead><tbody>
-        HTML;
-        foreach ($users as $u) {
-            $isSuper = $u['role'] === 'superadmin';
-            $status = $u['status'] === 'revoked' ? 'Revoked' : ((int) $u['has_password'] ? 'Active' : 'Waiting for password');
-            $last = (int) $u['last_login_at'] ? date('M j, Y g:i A', (int) $u['last_login_at']) : '—';
-            $live = $sessionCounts[(int) $u['id']] ?? 0;
-            echo '<tr><td>' . h($u['name']) . '</td><td>' . h($u['email']) . '</td><td>' . ($isSuper ? 'Superadmin' : 'Member') . '</td><td>' . h($status) . '</td><td>' . h($last) . '</td><td>' . ($live ? 'Yes' : 'No') . '</td><td class="account-actions">';
-            if (!$isSuper) {
-                $id = (int) $u['id'];
-                $button = static function (string $op, string $label, string $confirm = '') use ($id, $csrf): string {
-                    $onsubmit = $confirm ? ' onsubmit="return confirm(\'' . h($confirm) . '\')"' : '';
-                    return "<form method=\"post\" action=\"index.php?action=accounts\"{$onsubmit}><input type=\"hidden\" name=\"csrf_token\" value=\"{$csrf}\"><input type=\"hidden\" name=\"account_op\" value=\"{$op}\"><input type=\"hidden\" name=\"user_id\" value=\"{$id}\"><button class=\"button button-light\" type=\"submit\">{$label}</button></form>";
-                };
-                echo $u['status'] === 'revoked' ? $button('restore', 'Restore access') : $button('revoke', 'Revoke access', 'Revoke access for ' . $u['email'] . '? They will be signed out now.');
-                echo $button('resend', (int) $u['has_password'] ? 'Send reset link' : 'Resend link');
-                echo $button('delete', 'Delete', 'Delete the account for ' . $u['email'] . '? This cannot be undone.');
-            }
-            echo '</td></tr>';
+    </section>
+    <section class="panel accounts-panel">
+        <div class="table-wrap"><table class="accounts-table">
+            <thead><tr><th>Name</th><th>Email</th><th>Role</th><th>Status</th><th>Last sign-in</th><th>Online</th><th class="actions-column"><span class="visually-hidden">Actions</span></th></tr></thead><tbody>
+    HTML;
+    foreach ($users as $u) {
+        $isSuper = $u['role'] === 'superadmin';
+        $revoked = $u['status'] === 'revoked';
+        $status = $revoked ? 'Revoked' : ((int) $u['has_password'] ? 'Active' : 'Invited');
+        $statusClass = $revoked ? 'status-inactive' : 'status-active';
+        $last = (int) $u['last_login_at'] ? date('M j, Y g:i A', (int) $u['last_login_at']) : '—';
+        $live = ($sessionCounts[(int) $u['id']] ?? 0) ? 'Yes' : 'No';
+        $out .= '<tr><td class="name-cell">' . h($u['name']) . '</td><td class="muted">' . h($u['email']) . '</td><td class="muted">' . ($isSuper ? 'Superadmin' : 'Member')
+            . '</td><td><span class="status ' . $statusClass . '">' . $status . '</span></td><td class="muted">' . h($last) . '</td><td class="muted">' . $live . '</td><td class="row-actions account-actions">';
+        if (!$isSuper) {
+            $id = (int) $u['id'];
+            $button = static function (string $op, string $label, string $confirm = '', bool $danger = false) use ($id, $csrf): string {
+                $attrs = $confirm ? ' data-confirm="' . h($confirm) . '" data-confirm-title="Are you sure?" data-confirm-button="' . h($label) . '"' . ($danger ? '' : ' data-confirm-safe') : '';
+                return "<form method=\"post\" action=\"index.php?action=accounts\"{$attrs}><input type=\"hidden\" name=\"csrf_token\" value=\"{$csrf}\"><input type=\"hidden\" name=\"account_op\" value=\"{$op}\"><input type=\"hidden\" name=\"user_id\" value=\"{$id}\"><button class=\"button button-light" . ($danger ? ' button-danger-text' : '') . "\" type=\"submit\">{$label}</button></form>";
+            };
+            $out .= $revoked ? $button('restore', 'Restore access') : $button('revoke', 'Revoke access', $u['email'] . ' will be signed out and can no longer sign in.', true);
+            $out .= $button('resend', (int) $u['has_password'] ? 'Send reset link' : 'Resend invite');
+            $out .= $button('delete', 'Delete', 'The account for ' . $u['email'] . ' will be deleted. This cannot be undone.', true);
         }
-        echo '</tbody></table></div>';
-    });
-}
-
-function authPageWide(string $title, callable $body): never
-{
-    header('Cache-Control: no-store');
-    ?>
-<!doctype html>
-<html lang="en">
-<head>
-    <meta charset="utf-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title><?= h($title) ?> · TSV Secretary</title>
-    <script>
-        try { document.documentElement.dataset.theme = localStorage.getItem('theme') === 'light' ? 'light' : 'dark'; } catch { document.documentElement.dataset.theme = 'dark'; }
-    </script>
-    <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600;700&family=Geist+Mono:wght@400;500&display=swap">
-    <link rel="stylesheet" href="style.css?v=30">
-    <style>
-        .accounts-wrap { max-width: 1100px; margin: 0 auto; padding: 28px 20px; display: grid; gap: 18px; }
-        .accounts-head { display: flex; justify-content: space-between; align-items: center; gap: 12px; }
-        .account-create { display: grid; grid-template-columns: 1fr 1fr auto; gap: 12px; align-items: end; }
-        .accounts { width: 100%; border-collapse: collapse; }
-        .accounts th, .accounts td { text-align: left; padding: 10px 8px; border-bottom: 1px solid var(--border, #333); vertical-align: middle; }
-        .account-actions { display: flex; gap: 6px; flex-wrap: wrap; }
-        .account-actions form { margin: 0; }
-        .table-wrap { overflow-x: auto; }
-        @media (max-width: 700px) { .account-create { grid-template-columns: 1fr; } }
-    </style>
-</head>
-<body>
-<div class="accounts-wrap">
-    <div class="accounts-head"><h1><?= h($title) ?></h1><a class="button button-light" href="index.php">Back to TSV Secretary</a></div>
-    <div class="panel" style="padding: 20px; display: grid; gap: 14px;"><?php $body(); ?></div>
-</div>
-</body>
-</html>
-    <?php
-    exit;
+        $out .= '</td></tr>';
+    }
+    return $out . '</tbody></table></div></section>
+    <style>.account-actions{display:flex;gap:6px;flex-wrap:wrap;justify-content:flex-end}.account-actions form{margin:0}.accounts-panel{margin-top:16px}</style>';
 }

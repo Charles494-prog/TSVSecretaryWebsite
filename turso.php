@@ -197,7 +197,7 @@ final class TursoPDO extends PDO
     {
         $tables = [
             'officers' => "CREATE TABLE `officers` (\n  `id` int(10) unsigned NOT NULL AUTO_INCREMENT,\n  `masterlist_number` int(10) unsigned DEFAULT NULL,\n  `name` varchar(150) NOT NULL,\n  `tungkulin` varchar(150) NOT NULL,\n  `oath_taking_date` date DEFAULT NULL,\n  `oath_taking_text` varchar(50) DEFAULT NULL,\n  `ndi_signing_date` date DEFAULT NULL,\n  `ndi_signing_text` varchar(50) DEFAULT NULL,\n  `is_active` tinyint(1) NOT NULL DEFAULT 1,\n  `birthday` date DEFAULT NULL,\n  `wedding_anniversary` date DEFAULT NULL,\n  `contact_telegram` varchar(50) DEFAULT NULL,\n  PRIMARY KEY (`id`),\n  UNIQUE KEY `uq_officers_masterlist_number` (`masterlist_number`)\n) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci",
-            'memory_posts' => "CREATE TABLE `memory_posts` (\n  `id` int(10) unsigned NOT NULL AUTO_INCREMENT,\n  `taken_on` date NOT NULL,\n  `caption` varchar(2000) NOT NULL DEFAULT '',\n  `created_at` datetime NOT NULL,\n  `updated_at` datetime NOT NULL,\n  PRIMARY KEY (`id`),\n  KEY `idx_memory_posts_taken_on` (`taken_on`)\n) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci",
+            'memory_posts' => "CREATE TABLE `memory_posts` (\n  `id` int(10) unsigned NOT NULL AUTO_INCREMENT,\n  `taken_on` date NOT NULL,\n  `caption` varchar(2000) NOT NULL DEFAULT '',\n  `category` varchar(20) NOT NULL DEFAULT 'memories',\n  `created_at` datetime NOT NULL,\n  `updated_at` datetime NOT NULL,\n  PRIMARY KEY (`id`),\n  KEY `idx_memory_posts_taken_on` (`taken_on`)\n) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci",
             'memory_photos' => "CREATE TABLE `memory_photos` (\n  `id` int(10) unsigned NOT NULL AUTO_INCREMENT,\n  `post_id` int(10) unsigned NOT NULL,\n  `position` smallint(5) unsigned NOT NULL DEFAULT 0,\n  `kind` varchar(5) NOT NULL DEFAULT 'photo',\n  `checksum` char(40) NOT NULL,\n  `mime` varchar(20) NOT NULL,\n  `width` smallint(5) unsigned NOT NULL,\n  `height` smallint(5) unsigned NOT NULL,\n  `duration_ms` int(10) unsigned NOT NULL DEFAULT 0,\n  `size_bytes` bigint(20) unsigned NOT NULL DEFAULT 0,\n  `complete` tinyint(1) NOT NULL DEFAULT 1,\n  `uploaded_at` datetime DEFAULT NULL,\n  `photo` longtext NOT NULL,\n  `thumb` mediumtext NOT NULL,\n  PRIMARY KEY (`id`),\n  KEY `idx_memory_photos_post` (`post_id`,`position`),\n  KEY `idx_memory_photos_checksum` (`checksum`)\n) ENGINE=InnoDB DEFAULT CHARSET=ascii COLLATE=ascii_bin",
             'memory_video_chunks' => "CREATE TABLE `memory_video_chunks` (\n  `media_id` int(10) unsigned NOT NULL,\n  `seq` int(10) unsigned NOT NULL,\n  `data` mediumtext NOT NULL,\n  PRIMARY KEY (`media_id`,`seq`)\n) ENGINE=InnoDB DEFAULT CHARSET=ascii COLLATE=ascii_bin",
         ];
@@ -211,7 +211,7 @@ final class TursoPDO extends PDO
             "CREATE TABLE IF NOT EXISTS officers (id INTEGER PRIMARY KEY AUTOINCREMENT, masterlist_number INTEGER DEFAULT NULL UNIQUE, name TEXT NOT NULL, tungkulin TEXT NOT NULL, oath_taking_date TEXT DEFAULT NULL, oath_taking_text TEXT DEFAULT NULL, ndi_signing_date TEXT DEFAULT NULL, ndi_signing_text TEXT DEFAULT NULL, is_active INTEGER NOT NULL DEFAULT 1, birthday TEXT DEFAULT NULL, wedding_anniversary TEXT DEFAULT NULL, contact_telegram TEXT DEFAULT NULL)",
             "CREATE TABLE IF NOT EXISTS suguan_weeks (week_start TEXT NOT NULL PRIMARY KEY, services TEXT NOT NULL, updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)",
             "CREATE TABLE IF NOT EXISTS app_settings (setting_key TEXT NOT NULL PRIMARY KEY, setting_value TEXT NOT NULL DEFAULT '')",
-            "CREATE TABLE IF NOT EXISTS memory_posts (id INTEGER PRIMARY KEY AUTOINCREMENT, taken_on TEXT NOT NULL, caption TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL, updated_at TEXT NOT NULL)",
+            "CREATE TABLE IF NOT EXISTS memory_posts (id INTEGER PRIMARY KEY AUTOINCREMENT, taken_on TEXT NOT NULL, caption TEXT NOT NULL DEFAULT '', category TEXT NOT NULL DEFAULT 'memories', created_at TEXT NOT NULL, updated_at TEXT NOT NULL)",
             "CREATE INDEX IF NOT EXISTS idx_memory_posts_taken_on ON memory_posts (taken_on)",
             "CREATE TABLE IF NOT EXISTS memory_photos (id INTEGER PRIMARY KEY AUTOINCREMENT, post_id INTEGER NOT NULL, position INTEGER NOT NULL DEFAULT 0, kind TEXT NOT NULL DEFAULT 'photo', checksum TEXT NOT NULL, mime TEXT NOT NULL, width INTEGER NOT NULL, height INTEGER NOT NULL, duration_ms INTEGER NOT NULL DEFAULT 0, size_bytes INTEGER NOT NULL DEFAULT 0, complete INTEGER NOT NULL DEFAULT 1, uploaded_at TEXT DEFAULT NULL, photo TEXT NOT NULL, thumb TEXT NOT NULL)",
             "CREATE INDEX IF NOT EXISTS idx_memory_photos_post ON memory_photos (post_id, position)",
@@ -220,6 +220,11 @@ final class TursoPDO extends PDO
             "INSERT OR IGNORE INTO app_settings (setting_key, setting_value) VALUES ('pastor', ''), ('pd_tagasubaybay', ''), ('tsv_lead', ''), ('assistant_tsv_lead', ''), ('tsv_secretary', ''), ('locale_name', 'FYM AVENUE'), ('district_name', 'MARIKINA'), ('district_supervisor', 'CYRUS JOSE E. DIZON'), ('district_tsv_overseer', ''), ('webex_display_name', 'MKN-FYM Avenue'), ('weekly_meeting_datetime', ''), ('weekly_meeting_venue', ''), ('monthly_recruits', '[]')",
         ];
         $this->pipeline(array_map(static fn(string $sql): array => ['type' => 'execute', 'stmt' => ['sql' => $sql]], $statements));
+        // Databases made before Formal Activities get the category column.
+        $columns = array_column($this->run('PRAGMA table_info(memory_posts)')[1], 1);
+        if (!in_array('category', $columns, true)) {
+            $this->run("ALTER TABLE memory_posts ADD COLUMN category TEXT NOT NULL DEFAULT 'memories'");
+        }
     }
 }
 
