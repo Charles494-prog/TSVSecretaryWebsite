@@ -6,7 +6,36 @@ const toastIcons = {
     info: '<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" aria-hidden="true"><path d="M12 16v-4M12 8h.01"/></svg>',
 };
 
+// Phones (the Android app, or a phone-width browser) get full-screen "done" pages instead of toasts.
+const phoneLayout = window.matchMedia('(max-width: 640px), (pointer: coarse) and (max-height: 520px)');
+
+function showSuccessScreen(title, message, type) {
+    document.querySelector('.success-screen')?.remove();
+    const screen = document.createElement('div');
+    screen.className = 'success-screen';
+    screen.setAttribute('role', 'alertdialog');
+    screen.setAttribute('aria-modal', 'true');
+    screen.innerHTML = `<div class="success-screen-body"><span class="success-check success-${type}"></span><h2></h2><p></p><button class="button success-done" type="button">Done</button></div>`;
+    screen.querySelector('.success-check').innerHTML = toastIcons[type] || toastIcons.success;
+    screen.querySelector('h2').textContent = title;
+    const body = screen.querySelector('p');
+    body.textContent = message;
+    body.hidden = !message;
+    const close = () => {
+        screen.classList.add('is-leaving');
+        window.setTimeout(() => screen.remove(), 220);
+    };
+    screen.querySelector('.success-done').addEventListener('click', close);
+    document.body.append(screen);
+    screen.querySelector('.success-done').focus({ preventScroll: true });
+}
+
 function showToast(title, message = '', type = 'success') {
+    // Errors stay on the page; a status switch is too quick a change to need a whole page.
+    if (phoneLayout.matches && type !== 'error' && title !== 'Status Updated') {
+        showSuccessScreen(title, message, type);
+        return;
+    }
     if (!toastRegion) {
         return;
     }
@@ -151,12 +180,12 @@ async function checkConnection() {
         state = 'server';
     }
     if (dbLabel && dbDot) {
-        dbLabel.textContent = { online: dbLabel.dataset.online || 'Local MySQL', database: 'No connection', server: 'Server offline' }[state];
+        dbLabel.textContent = { online: 'Local database', database: 'No connection', server: 'Server offline' }[state];
         dbDot.classList.toggle('is-offline', state !== 'online');
         dbDot.title = {
             online: 'Connected',
-            database: 'MySQL is not reachable. Start it in the XAMPP Control Panel.',
-            server: 'Apache is not responding. Start it in the XAMPP Control Panel.',
+            database: 'The database file could not be opened.',
+            server: 'The app is not responding. Restart TSV Secretary.',
         }[state];
     }
 }
@@ -265,6 +294,7 @@ let saveSelectionTimeout;
 document.querySelector('[data-theme-toggle]')?.addEventListener('click', () => {
     const theme = document.documentElement.dataset.theme === 'light' ? 'dark' : 'light';
     document.documentElement.dataset.theme = theme;
+    try { window.LtsvssAndroid?.setDark(theme === 'dark'); } catch {}
     try {
         localStorage.setItem('theme', theme);
     } catch {
@@ -334,7 +364,9 @@ function updateAgendaFields() {
             const webexUsed = Number(webexCount?.value || 0) > 0;
             const recruitCount = Number(monthlyFields.querySelector('[name="recruit_count"]')?.value || 0);
             const webexWhen = field.dataset.webexWhen;
+            const directoryOn = generatorForm.querySelector('[data-dir-toggle]')?.checked === true;
             const enabled = isFormChecked(field.dataset.onlyFor)
+                && (!field.hasAttribute('data-dir-detail') || directoryOn)
                 && (!webexWhen || (webexWhen === 'used') === webexUsed)
                 && (!field.hasAttribute('data-recruit-list') || recruitCount > 0);
             field.hidden = !enabled;
@@ -379,12 +411,13 @@ generatorForm?.querySelectorAll('[data-rows]').forEach((container) => {
 updateAgendaFields();
 updateAgendaFields();
 
+const generatorIsPage = generatorDialog?.classList.contains('generator-inline');
 generatorDialog?.querySelectorAll('[data-close-generator]').forEach((button) => {
-    button.addEventListener('click', () => generatorDialog.close());
+    button.addEventListener('click', () => (generatorIsPage ? window.location.assign('index.php') : generatorDialog.close()));
 });
 
 generatorDialog?.addEventListener('click', (event) => {
-    if (event.target === generatorDialog) {
+    if (event.target === generatorDialog && !generatorIsPage) {
         generatorDialog.close();
     }
 });
@@ -632,3 +665,113 @@ window.syncSegmented = (group, instant = false) => {
     indicator.style.transform = `translateX(${active.offsetLeft}px)`;
     if (instant) requestAnimationFrame(() => group.classList.remove('is-instant'));
 };
+
+// ---- The form generator page (phones): two steps, choose the forms, then fill in what they need ----
+if (generatorIsPage && generatorForm) {
+    const body = generatorForm.querySelector('.generator-body');
+    const groups = body.querySelector('.generator-groups');
+    const actions = generatorForm.querySelector('.panel-footer .form-actions');
+    const boxes = [...generatorForm.querySelectorAll('input[name="print_forms[]"]:not(:disabled)')];
+    const checkedBoxes = () => boxes.filter((box) => box.checked);
+    const labelOf = (box) => box.closest('label').querySelector('span').childNodes[0].textContent.trim();
+
+    const stepper = document.createElement('div');
+    stepper.className = 'gen-steps';
+    stepper.innerHTML = '<button type="button" data-goto="1"><b>1</b>Choose forms</button><i aria-hidden="true"></i><button type="button" data-goto="2"><b>2</b>Fill in details</button>';
+    body.prepend(stepper);
+
+    const chosen = document.createElement('div');
+    chosen.className = 'gen-chosen';
+    groups.after(chosen);
+    const nothing = document.createElement('p');
+    nothing.className = 'gen-nothing';
+    nothing.textContent = 'These forms need no details. Tap Generate to make them.';
+    chosen.after(nothing);
+
+    const back = document.createElement('button');
+    back.type = 'button';
+    back.className = 'button button-light gen-back';
+    back.textContent = 'Back';
+    const next = document.createElement('button');
+    next.type = 'button';
+    next.className = 'button gen-next';
+    actions.prepend(back);
+    actions.append(next);
+
+    const detailSections = ['[data-suguan-builder]', '[data-meeting-fields]', '[data-agenda-fields]', '[data-forms-resumen-fields]', '[data-monthly-fields]']
+        .map((selector) => generatorForm.querySelector(selector))
+        .filter(Boolean);
+
+    const refresh = () => {
+        const picked = checkedBoxes();
+        next.disabled = picked.length === 0;
+        next.textContent = picked.length ? `Next · ${picked.length} ${picked.length === 1 ? 'form' : 'forms'}` : 'Choose a form';
+        const change = document.createElement('button');
+        change.type = 'button';
+        change.className = 'gen-change';
+        change.textContent = 'Change';
+        change.addEventListener('click', () => setStep(1));
+        const chips = picked.map((box) => {
+            const chip = document.createElement('span');
+            chip.className = 'gen-chip';
+            chip.textContent = labelOf(box);
+            return chip;
+        });
+        chosen.replaceChildren(...chips, change);
+        nothing.hidden = detailSections.some((section) => !section.hidden);
+    };
+    function setStep(step) {
+        if (step === 2 && checkedBoxes().length === 0) {
+            return;
+        }
+        generatorForm.dataset.step = String(step);
+        stepper.querySelectorAll('[data-goto]').forEach((button) => {
+            button.setAttribute('aria-current', button.dataset.goto === String(step) ? 'step' : 'false');
+        });
+        refresh();
+        window.scrollTo({ top: 0 });
+    }
+    boxes.forEach((box) => box.addEventListener('change', () => window.setTimeout(refresh, 0)));
+    stepper.querySelectorAll('[data-goto]').forEach((button) => button.addEventListener('click', () => setStep(Number(button.dataset.goto))));
+    next.addEventListener('click', () => setStep(2));
+    back.addEventListener('click', () => setStep(1));
+    // After a failed Generate the page comes back with the problems listed: show them with the details.
+    setStep(document.querySelector('.content > .alert-error:not([hidden])') && checkedBoxes().length ? 2 : 1);
+}
+
+// ---- Directory Report: "Update data in the INC Directory" shows the form; changes from the Directory are marked ----
+const directoryToggle = generatorForm?.querySelector('[data-dir-toggle]');
+const directoryList = generatorForm?.querySelector('[data-dir-baseline]');
+if (directoryToggle && directoryList) {
+    directoryToggle.addEventListener('change', updateAgendaFields);
+    const baseline = JSON.parse(directoryList.dataset.dirBaseline || '[]');
+    const known = new Set(baseline.map(([day, time, lang]) => `${day}|${time}|${lang}`));
+    const timeText = (value) => {
+        const [h, m] = (value || '').split(':').map(Number);
+        return Number.isFinite(h) ? `${((h + 11) % 12) + 1}:${String(m).padStart(2, '0')}${h < 12 ? 'AM' : 'PM'}` : value;
+    };
+    const markChanges = () => {
+        directoryList.querySelectorAll('[data-dir-row]').forEach((row, index) => {
+            const day = row.querySelector('[name="dir_day[]"]').value;
+            const time = row.querySelector('[name="dir_time[]"]').value;
+            const lang = row.querySelector('[name="dir_lang[]"]').value;
+            const changed = !known.has(`${day}|${time}|${lang}`);
+            row.classList.toggle('is-changed', changed);
+            const was = row.querySelector('.dir-was');
+            const before = baseline[index];
+            was.hidden = !changed;
+            was.textContent = before ? `Was: ${before[0]} ${timeText(before[1])} ${before[2]}` : 'New';
+        });
+        generatorForm.querySelectorAll('[data-baseline]').forEach((input) => {
+            input.closest('label').classList.toggle('is-changed', input.value.trim() !== input.dataset.baseline.trim());
+        });
+    };
+    generatorForm.addEventListener('input', (event) => {
+        if (event.target.closest('[data-dir-detail]')) markChanges();
+    });
+    generatorForm.addEventListener('change', (event) => {
+        if (event.target.closest('[data-dir-detail]')) markChanges();
+    });
+    markChanges();
+}
+

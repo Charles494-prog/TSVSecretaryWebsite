@@ -128,8 +128,7 @@ button { font: inherit; }
 .team-avatar {
     width: 22px;
     height: 22px;
-    border-radius: 50%;
-    background: conic-gradient(from 180deg, #50e3c2, #0070f3, #7928ca, #ff0080, #50e3c2);
+    background: url("logo.png") center / contain no-repeat;
     flex-shrink: 0;
 }
 .team-avatar-small { width: 18px; height: 18px; }
@@ -637,6 +636,7 @@ input:focus, select:focus, textarea:focus { border-color: var(--focus-border); o
 .row-list-row + .row-list-row { margin-top: 8px; }
 .activity-row { grid-template-columns: 1.4fr 1.4fr 160px; }
 .recruit-row { grid-template-columns: 1fr 170px 170px; }
+.directory-row { grid-template-columns: 1.3fr 1fr 1fr; }
 .row-list-head span { color: var(--faint); font-size: 12px; font-weight: 500; }
 @media (max-width: 640px) {
     .row-list-head { display: none; }
@@ -1094,6 +1094,31 @@ input:focus, select:focus, textarea:focus { border-color: var(--focus-border); o
     .suguan-download .button { flex: 1; }
 }
 
+/* Phones: each officer row becomes a card (number, name and status; tungkulin and actions; then the details). */
+@media (max-width: 640px) {
+    .officers-table thead { display: none; }
+    .officers-table tbody tr[data-officer-row] {
+        display: grid;
+        grid-template-columns: auto 1fr auto;
+        grid-template-areas: "blg name status" ". role actions";
+        align-items: center;
+        column-gap: 10px;
+        row-gap: 2px;
+        padding: 14px 16px;
+        border-bottom: 1px solid var(--line);
+    }
+    .officers-table tbody tr[data-officer-row]:last-child { border-bottom: 0; }
+    .officers-table td { display: block; height: auto; padding: 0; border: 0; white-space: normal; }
+    .officers-table .cell-blg { grid-area: blg; min-width: 18px; }
+    .officers-table .name-cell { grid-area: name; }
+    .officers-table .cell-status { grid-area: status; justify-self: end; }
+    .officers-table .cell-role { grid-area: role; font-size: 13px; }
+    .officers-table .row-actions { display: flex; grid-area: actions; justify-self: end; }
+    .officers-table .cell-detail { grid-column: 2 / -1; font-size: 12px; }
+    .officers-table .cell-detail::before { content: attr(data-label) ": "; color: var(--faint); font-family: var(--sans); }
+    .officers-table .cell-detail[data-empty] { display: none; }
+}
+
 @media print {
     .generator-dialog, .sidebar, .topbar { display: none; }
 }
@@ -1116,6 +1141,11 @@ input:focus, select:focus, textarea:focus { border-color: var(--focus-border); o
 }
 .segmented button:hover { color: var(--ink); }
 .segmented button.is-active { background: var(--bg-active); color: var(--ink); box-shadow: inset 0 0 0 1px var(--line-2); }
+/* TSV Memories / Formal Activities switch: links styled like the segmented tabs. */
+.segmented a { display: inline-flex; align-items: center; height: 30px; padding: 0 14px; border-radius: 6px; color: var(--muted); font-size: 13px; font-weight: 500; text-decoration: none; }
+.segmented a:hover { color: var(--ink); }
+.segmented a.is-active { background: var(--bg-active); color: var(--ink); box-shadow: inset 0 0 0 1px var(--line-2); }
+.collection-toggle { margin-bottom: 14px; }
 
 .memories-onthisday[hidden] { display: none; }
 .memories-onthisday { padding: 16px; border: 1px solid var(--line-2); border-radius: 12px; background: linear-gradient(135deg, var(--purple-bg), var(--blue-bg)); }
@@ -2050,3 +2080,520 @@ dialog[open]::backdrop { animation: backdrop-in .3s ease-out; }
     .reveal { opacity: 1; transform: none; }
     ::view-transition-old(memories-view), ::view-transition-new(memories-view) { animation: none; }
 }
+
+/* ---- Phone layout (the Android app, or any phone-width screen) ----
+   A slim header with the logo and the theme switch, and an Instagram-style tab bar at the bottom.
+   It also applies to a phone turned sideways: a touch screen that is wide but short. */
+.mobile-brand { display: none; }
+@media (max-width: 640px), (pointer: coarse) and (max-height: 520px) {
+    .shell { display: block; }
+    .sidebar {
+        position: fixed;
+        top: auto;
+        right: 0;
+        bottom: 0;
+        left: 0;
+        z-index: 40;
+        display: flex;
+        width: auto;
+        height: calc(56px + env(safe-area-inset-bottom, 0px));
+        padding: 0 0 env(safe-area-inset-bottom, 0px);
+        border: 0;
+        border-top: 1px solid var(--line);
+        background: var(--bg);
+    }
+    .sidebar .team { display: none; }
+    .side-nav { display: flex; flex: 1; flex-direction: row; justify-content: space-around; gap: 0; overflow: visible; }
+    .side-link {
+        flex: 1;
+        justify-content: center;
+        width: auto;
+        height: 56px;
+        padding: 0;
+        border-radius: 0;
+        background: none;
+        color: var(--muted);
+        -webkit-tap-highlight-color: transparent;
+    }
+    .side-link:hover, .side-link.is-active { background: none; }
+    .side-link.is-active { color: var(--ink); }
+    .side-link span { display: none; }
+    .side-link .icon { width: 26px; height: 26px; transition: transform .15s var(--ease-out, ease); }
+    .side-link.is-active .icon { stroke-width: 2.4; }
+    .side-link:hover .icon { transform: none; }
+    .side-link:active .icon { transform: scale(.88); }
+
+    .topbar { top: 0; height: 52px; padding: 0 16px; }
+    .mobile-brand { display: flex; align-items: center; gap: 10px; color: var(--ink); font-size: 18px; font-weight: 700; letter-spacing: -0.02em; text-decoration: none; }
+    .mobile-brand .team-avatar { width: 28px; height: 28px; }
+    .crumbs, .topbar-link, .find kbd { display: none; }
+
+    .content { padding: 20px 16px calc(84px + env(safe-area-inset-bottom, 0px)); }
+    .page-title { margin-bottom: 20px; }
+    .page-title-row { align-items: stretch; }
+    .page-title-actions { display: grid; grid-template-columns: 1fr 1fr; width: 100%; }
+    .page-title-actions .button, .page-title-actions form, .page-title-actions form .button { width: 100%; justify-content: center; }
+    .page-title-actions form { grid-column: 1 / -1; }
+    .page-title-actions .button { height: 40px; }
+
+    /* Pop-ups slide up as full-screen sheets. */
+    .generator-dialog {
+        width: 100%;
+        max-width: none;
+        height: 100%;
+        max-height: none;
+        margin: 0;
+        border: 0;
+        border-radius: 0;
+    }
+    .generator-dialog .generator-form { height: 100%; max-height: none; }
+    .generator-body { flex: 1; }
+    .toast-region { right: 12px; bottom: calc(68px + env(safe-area-inset-bottom, 0px)); left: 12px; }
+    .page-footer { display: none; }
+}
+
+/* Phone turned sideways: wide but short, so the bars get slimmer and nothing is stretched across the width. */
+@media (pointer: coarse) and (max-height: 520px) and (min-width: 641px) {
+    .topbar { height: 44px; }
+    .mobile-brand { font-size: 16px; }
+    .mobile-brand .team-avatar { width: 24px; height: 24px; }
+    .sidebar { height: calc(48px + env(safe-area-inset-bottom, 0px)); }
+    .side-link { height: 48px; }
+    .side-link .icon { width: 22px; height: 22px; }
+    .content { width: min(960px, 100%); padding: 14px 24px calc(64px + env(safe-area-inset-bottom, 0px)); }
+    .page-title { margin-bottom: 14px; }
+    .page-title h1 { font-size: 22px; margin-bottom: 2px; }
+    .page-title p { font-size: 13px; }
+    .page-title-actions { display: flex; flex-wrap: wrap; width: auto; }
+    .page-title-actions .button, .page-title-actions form, .page-title-actions form .button { width: auto; }
+    .page-title-actions form { grid-column: auto; }
+    .page-title-actions .button { height: 36px; }
+    .stat-card { padding: 10px 14px; }
+    .stat-card strong { font-size: 20px; }
+    .toast-region { bottom: calc(58px + env(safe-area-inset-bottom, 0px)); left: auto; width: min(380px, calc(100% - 24px)); }
+}
+
+/* ---- Form generator as a page (phones open it from the tab bar instead of as a pop-up) ---- */
+.side-link.mobile-nav { display: none; }
+.generator-dialog.generator-inline {
+    position: static;
+    display: block;
+    width: 100%;
+    max-width: none;
+    height: auto;
+    max-height: none;
+    margin: 0;
+    padding: 0;
+    overflow: visible;
+    border: 0;
+    border-radius: 0;
+    background: none;
+    box-shadow: none;
+    color: inherit;
+}
+.generator-inline .generator-heading { display: none; }
+.generator-inline .generator-form { height: auto; max-height: none; }
+.generator-inline .generator-body { padding: 0; overflow: visible; }
+.generator-inline .panel-footer {
+    position: sticky;
+    bottom: 0;
+    z-index: 6;
+    margin: 20px 0 0;
+    border: 1px solid var(--line-2);
+    border-radius: 12px;
+    background: var(--bg-2);
+}
+
+@media (max-width: 640px), (pointer: coarse) and (max-height: 520px) {
+    .side-link.desktop-nav { display: none; }
+    .side-link.mobile-nav { display: flex; }
+
+    /* Cancel / Generate stay on screen just above the tab bar. */
+    .generator-inline .panel-footer {
+        bottom: calc(56px + env(safe-area-inset-bottom, 0px));
+        flex-direction: row;
+        align-items: center;
+        margin: 16px -16px 0;
+        padding: 10px 16px;
+        border: 0;
+        border-top: 1px solid var(--line);
+        border-radius: 0;
+        background: var(--bg);
+    }
+    .generator-inline .panel-footer > span { display: none; }
+    .generator-inline .panel-footer .form-actions { width: 100%; }
+    .generator-inline .panel-footer .button { flex: 1; height: 44px; justify-content: center; }
+    .generator-inline .generator-note { display: none; }
+
+    /* Form choices: full-width rows that are easy to tap. */
+    .generator-inline .generator-groups { gap: 14px; }
+    .generator-inline .generator-group > legend {
+        padding: 0 2px 8px;
+        color: var(--faint);
+        font-size: 12px;
+        font-weight: 600;
+        letter-spacing: .06em;
+        text-transform: uppercase;
+    }
+    .generator-inline .generator-groups .generator-group { padding: 2px 14px 4px; border: 1px solid var(--line-2); border-radius: 12px; background: var(--bg-2); }
+    .generator-inline .generator-groups .generator-group > legend { padding: 0 6px; }
+    .generator-inline .generator-option { min-height: 48px; padding: 10px 0; font-size: 15px; }
+    .generator-inline .generator-option input[type="checkbox"] { width: 20px; height: 20px; }
+    .generator-inline .suguan-builder, .generator-inline .agenda-fields { margin-top: 18px; }
+}
+
+/* ---- Suguan planner on a phone ---- */
+.service-edit { display: none; }
+@media (max-width: 640px), (pointer: coarse) and (max-height: 520px) {
+    .generator-inline .suguan-builder { padding: 0; border: 0; background: none; }
+    .generator-inline .suguan-builder > legend { padding: 0 2px 10px; color: var(--faint); font-size: 12px; font-weight: 600; letter-spacing: .06em; text-transform: uppercase; }
+    .suguan-builder-head { gap: 10px; }
+    .suguan-toolbar { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; width: 100%; }
+    .suguan-toolbar .button { justify-content: center; height: 40px; padding: 0 8px; }
+    .suguan-toolbar .save-state { grid-column: 1 / -1; }
+    /* The names stay in reach while scrolling down to a service: pick one, then tap a role. */
+    .officer-picker {
+        position: sticky;
+        top: 52px;
+        z-index: 4;
+        margin: 0 -16px;
+        padding: 10px 16px;
+        border: 0;
+        border-bottom: 1px solid var(--line);
+        border-radius: 0;
+        background: var(--bg);
+    }
+    .officer-picker-head { margin-bottom: 8px; }
+    .service-badges { padding-left: 0; }
+    .service-edit { display: inline-flex; }
+    .service-card.is-editing .service-edit { background: var(--bg-active); color: var(--ink); }
+    .service-card:not(.is-editing) .service-fields { display: none; }
+    .service-fields { padding-left: 16px; }
+    .role-slot { min-height: 56px; }
+}
+@media (pointer: coarse) and (max-height: 520px) and (min-width: 641px) {
+    .officer-picker { top: 44px; }
+}
+
+/* ---- Success pages (phones show these instead of toasts) ---- */
+.success-screen {
+    position: fixed;
+    inset: 0;
+    z-index: 100;
+    display: grid;
+    place-items: center;
+    padding: 24px 24px calc(24px + env(safe-area-inset-bottom, 0px));
+    background: var(--bg);
+    color: var(--ink);
+    animation: success-in .28s var(--ease-out, ease);
+}
+.success-screen.is-leaving { opacity: 0; transition: opacity .2s ease; }
+.success-screen-body { display: flex; flex-direction: column; align-items: center; gap: 10px; width: 100%; max-width: 360px; text-align: center; }
+.success-check {
+    display: grid;
+    place-items: center;
+    width: 88px;
+    height: 88px;
+    margin-bottom: 10px;
+    border-radius: 50%;
+    background: var(--success-bg, var(--green-bg));
+    color: var(--green);
+    animation: success-pop .45s var(--ease-spring, ease) both;
+}
+.success-check.success-info { background: var(--blue-bg); color: var(--blue); }
+.success-check svg { width: 42px; height: 42px; }
+.success-screen h2 { margin: 0; font-size: 24px; font-weight: 650; letter-spacing: -0.02em; }
+.success-screen p { margin: 0; color: var(--muted); font-size: 15px; line-height: 1.5; }
+.success-done { width: 100%; height: 48px; margin-top: 24px; justify-content: center; font-size: 15px; }
+@keyframes success-in { from { opacity: 0; transform: translateY(12px); } }
+@keyframes success-pop { from { transform: scale(.4); opacity: 0; } }
+
+/* ---- Pop-ups on a phone: forms become full-screen pages, confirmations a bottom sheet ---- */
+@media (max-width: 640px), (pointer: coarse) and (max-height: 520px) {
+    .confirm-dialog {
+        top: auto;
+        bottom: 0;
+        width: 100%;
+        max-width: none;
+        margin: 0;
+        padding: 12px 20px calc(20px + env(safe-area-inset-bottom, 0px));
+        border: 0;
+        border-top: 1px solid var(--line-2);
+        border-radius: 18px 18px 0 0;
+        animation: sheet-up .25s var(--ease-out, ease);
+    }
+    .confirm-dialog::before { content: ""; display: block; width: 40px; height: 4px; margin: 0 auto 18px; border-radius: 2px; background: var(--line-3); }
+    .confirm-dialog .form-actions { flex-direction: column-reverse; gap: 10px; margin-top: 20px; }
+    .confirm-dialog .form-actions .button { width: 100%; height: 48px; justify-content: center; }
+
+    /* Import and New memory: full-screen, with the title bar on top and the buttons at the bottom. */
+    .generator-dialog:not(.generator-inline) { animation: sheet-up .25s var(--ease-out, ease); }
+    .generator-dialog:not(.generator-inline) .generator-heading {
+        position: sticky;
+        top: 0;
+        z-index: 2;
+        align-items: center;
+        padding: 12px 16px;
+        border-bottom: 1px solid var(--line);
+        background: var(--bg-2);
+    }
+    .generator-dialog:not(.generator-inline) .generator-heading h2 { font-size: 18px; }
+    .generator-dialog:not(.generator-inline) .generator-heading p { font-size: 13px; }
+    .generator-dialog:not(.generator-inline) .panel-footer { flex-direction: row; padding: 12px 16px calc(12px + env(safe-area-inset-bottom, 0px)); }
+    .generator-dialog:not(.generator-inline) .panel-footer > span:empty { display: none; }
+    .generator-dialog:not(.generator-inline) .panel-footer .form-actions { width: 100%; }
+    .generator-dialog:not(.generator-inline) .panel-footer .button { flex: 1; height: 46px; justify-content: center; }
+    .dropzone { min-height: 150px; }
+}
+@keyframes sheet-up { from { transform: translateY(40px); opacity: 0; } }
+
+/* ---- Text that differs on a phone (tap) and a computer (click, drag) ---- */
+.only-phone { display: none; }
+
+@media (max-width: 640px), (pointer: coarse) and (max-height: 520px) {
+    .only-desktop { display: none; }
+    .only-phone { display: inline; }
+    small.only-phone { display: block; }
+
+    /* ---- Form generator: step 1 choose forms, step 2 fill in details ---- */
+    .gen-steps { display: flex; align-items: center; gap: 8px; margin: -4px 0 18px; }
+    .gen-steps button {
+        display: inline-flex;
+        align-items: center;
+        gap: 8px;
+        padding: 0;
+        border: 0;
+        background: none;
+        color: var(--faint);
+        font: inherit;
+        font-size: 13px;
+        font-weight: 600;
+        white-space: nowrap;
+    }
+    .gen-steps b {
+        display: grid;
+        place-items: center;
+        width: 24px;
+        height: 24px;
+        border: 1px solid var(--line-3);
+        border-radius: 50%;
+        font-size: 12px;
+    }
+    .gen-steps button[aria-current="step"] { color: var(--ink); }
+    .gen-steps button[aria-current="step"] b { border-color: var(--ink); background: var(--ink); color: var(--bg); }
+    .gen-steps i { flex: 1; height: 1px; background: var(--line-2); }
+
+    .generator-inline form[data-step="1"] .generator-body > :not(.gen-steps):not(.generator-groups) { display: none; }
+    .generator-inline form[data-step="2"] .generator-groups { display: none; }
+    .generator-inline form[data-step="1"] .gen-back,
+    .generator-inline form[data-step="1"] button[type="submit"],
+    .generator-inline form[data-step="2"] a.button,
+    .generator-inline form[data-step="2"] .gen-next { display: none; }
+    .gen-next:disabled { opacity: .45; }
+
+    .gen-chosen { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin-bottom: 18px; }
+    .gen-chip { padding: 5px 10px; border: 1px solid var(--line-2); border-radius: 999px; background: var(--bg-2); font-size: 12px; font-weight: 500; }
+    .gen-change { padding: 5px 4px; border: 0; background: none; color: var(--blue); font: inherit; font-size: 13px; font-weight: 600; }
+    .gen-nothing { margin: 8px 0; padding: 18px; border: 1px dashed var(--line-3); border-radius: 12px; color: var(--muted); text-align: center; }
+    .gen-nothing[hidden] { display: none; }
+
+    /* Each form is a card row with an on/off switch. */
+    .generator-inline .generator-option { justify-content: space-between; gap: 14px; }
+    .generator-inline .generator-option > span { order: 1; flex: 1; }
+    .generator-inline .generator-option .option-note { margin-top: 3px; color: var(--muted); font-size: 12.5px; line-height: 1.4; }
+    .generator-inline .generator-option input[type="checkbox"] {
+        appearance: none;
+        position: relative;
+        flex: none;
+        order: 2;
+        width: 46px;
+        height: 28px;
+        margin: 0;
+        border: 0;
+        border-radius: 14px;
+        background: var(--line-3);
+        cursor: pointer;
+        transition: background .2s ease;
+    }
+    .generator-inline .generator-option input[type="checkbox"]::before {
+        content: "";
+        position: absolute;
+        top: 3px;
+        left: 3px;
+        width: 22px;
+        height: 22px;
+        border-radius: 50%;
+        background: #fff;
+        box-shadow: 0 1px 3px rgb(0 0 0 / 30%);
+        transition: transform .2s var(--ease-out, ease);
+    }
+    .generator-inline .generator-option input[type="checkbox"]:checked { background: var(--blue); }
+    .generator-inline .generator-option input[type="checkbox"]:checked::before { transform: translateX(18px); }
+
+    /* Detail sections are cards with a clear heading. */
+    .generator-inline .agenda-fields { padding: 4px 14px 14px; border: 1px solid var(--line-2); border-radius: 12px; background: var(--bg-2); }
+    .generator-inline .agenda-fields > legend,
+    .generator-inline .generator-groups .generator-group > legend { color: var(--muted); font-size: 12px; font-weight: 600; letter-spacing: .06em; text-transform: uppercase; }
+    .generator-inline .meeting-fields { padding: 14px; border: 1px solid var(--line-2); border-radius: 12px; background: var(--bg-2); }
+    .generator-inline .meeting-fields[hidden] { display: none; }
+    .generator-inline .row-list-row input, .generator-inline .row-list-row select { min-height: 42px; }
+
+    /* ---- TSV Memories: compact header, a floating New button, a slim "On this day" strip ---- */
+    .collection-toggle { display: flex; width: 100%; margin-bottom: 12px; }
+    .collection-toggle a { flex: 1; justify-content: center; height: 36px; }
+    .collection-toggle ~ h1 { font-size: 24px; }
+    .collection-toggle ~ p { display: none; }
+    .page-title-row:has(.collection-toggle) > div:first-child { flex: 1 1 100%; }
+    .page-title-actions .button[data-memory-new] {
+        position: fixed;
+        right: 18px;
+        bottom: calc(72px + env(safe-area-inset-bottom, 0px));
+        z-index: 30;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        gap: 0;
+        width: 56px;
+        height: 56px;
+        padding: 0;
+        border-radius: 50%;
+        font-size: 0;
+        line-height: 0;
+        box-shadow: 0 6px 20px rgb(0 0 0 / 35%);
+        grid-column: auto;
+    }
+    .page-title-actions .button[data-memory-new] .icon { width: 24px; height: 24px; margin: 0; }
+    .memories-toolbar { gap: 8px; }
+    .memories-toolbar .segmented { display: flex; width: 100%; }
+    .memories-toolbar .segmented button { flex: 1; padding: 0 4px; }
+    .memories-toolbar .pill { height: 36px; }
+    .memories-onthisday { padding: 12px; }
+    .onthisday-head { margin-bottom: 10px; }
+    .onthisday-card { flex: 0 0 128px; height: 160px; }
+}
+@media (pointer: coarse) and (max-height: 520px) and (min-width: 641px) {
+    .page-title-actions .button[data-memory-new] { bottom: calc(60px + env(safe-area-inset-bottom, 0px)); }
+}
+
+/* ---- Suguan on a phone: tap a role, pick the officer from a sheet (no sideways name strip) ---- */
+@media (max-width: 640px), (pointer: coarse) and (max-height: 520px) {
+    .officer-picker { display: none; }
+    .role-assign .role-name { font-size: 15px; }
+    .role-slot:not(.is-filled) .role-name { color: var(--blue); font-weight: 600; }
+}
+body.has-sheet { overflow: hidden; }
+.officer-sheet { position: fixed; inset: 0; z-index: 90; display: flex; flex-direction: column; justify-content: flex-end; }
+.officer-sheet-backdrop { position: absolute; inset: 0; background: rgb(0 0 0 / 55%); animation: sheet-fade .2s ease; }
+.officer-sheet-panel {
+    position: relative;
+    display: flex;
+    flex-direction: column;
+    max-height: 78vh;
+    padding: 8px 0 calc(12px + env(safe-area-inset-bottom, 0px));
+    border-top: 1px solid var(--line-2);
+    border-radius: 18px 18px 0 0;
+    background: var(--bg-2);
+    color: var(--ink);
+    animation: sheet-up .25s var(--ease-out, ease);
+}
+.officer-sheet.is-leaving .officer-sheet-panel { transform: translateY(30px); opacity: 0; transition: transform .2s ease, opacity .2s ease; }
+.officer-sheet.is-leaving .officer-sheet-backdrop { opacity: 0; transition: opacity .2s ease; }
+.officer-sheet-grip { align-self: center; width: 40px; height: 4px; margin: 2px 0 12px; border-radius: 2px; background: var(--line-3); }
+.officer-sheet-head { display: flex; flex-direction: column; gap: 2px; padding: 0 20px 12px; border-bottom: 1px solid var(--line); }
+.officer-sheet-head strong { font-size: 18px; }
+.officer-sheet-head .muted { font-size: 13px; }
+.officer-sheet-list { flex: 1; overflow-y: auto; overscroll-behavior: contain; }
+.officer-sheet-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    width: 100%;
+    min-height: 60px;
+    padding: 10px 20px;
+    border: 0;
+    border-bottom: 1px solid var(--line);
+    background: none;
+    color: inherit;
+    font: inherit;
+    text-align: left;
+    -webkit-tap-highlight-color: transparent;
+}
+.officer-sheet-row:active { background: var(--bg-active); }
+.officer-sheet-row.is-current { background: var(--blue-bg); }
+.officer-sheet-name { display: flex; flex-direction: column; gap: 2px; font-size: 16px; font-weight: 500; }
+.officer-sheet-name small { font-size: 12.5px; font-weight: 400; }
+.officer-sheet-name small.is-warning { color: var(--amber); }
+.officer-sheet-check { color: var(--blue); font-size: 18px; font-weight: 700; }
+.officer-sheet-empty { padding: 20px; text-align: center; }
+.officer-sheet-actions { display: flex; gap: 10px; padding: 12px 16px 0; }
+.officer-sheet-actions .button { flex: 1; height: 46px; justify-content: center; }
+@keyframes sheet-fade { from { opacity: 0; } }
+
+/* Video full screen where the web view cannot do it (the Android app): the player covers the screen. */
+.vplayer.is-fill-screen {
+    position: fixed;
+    inset: 0;
+    z-index: 1000;
+    width: 100%;
+    height: 100%;
+    max-width: none;
+    max-height: none;
+    margin: 0;
+    border-radius: 0;
+    background: #000;
+    aspect-ratio: auto;
+}
+.vplayer.is-fill-screen video { width: 100%; height: 100%; max-height: none; object-fit: contain; }
+body.has-fill-screen { overflow: hidden; }
+
+/* Calendar: a short slide in the swipe's direction when the month changes. */
+.memories-calendar .calendar-grid { animation: cal-in .22s var(--ease-out, ease); }
+@keyframes cal-in { from { opacity: .4; } }
+
+/* ---- Suguan: drag a service by its grip to move it (mouse or finger) ---- */
+.drag-handle { touch-action: none; cursor: grab; }
+body.is-reordering, body.is-reordering * { cursor: grabbing !important; user-select: none; -webkit-user-select: none; }
+.service-card.is-lifted {
+    box-shadow: 0 18px 40px rgb(0 0 0 / 45%), 0 0 0 1px var(--line-3);
+    transform: scale(1.02);
+    opacity: .97;
+    pointer-events: none;
+    transition: transform .12s ease, box-shadow .12s ease;
+}
+.service-drop-gap { margin: 6px 0; border: 2px dashed var(--line-3); border-radius: 12px; background: var(--bg-2); }
+.service-list.is-reordering .insert-row { visibility: hidden; height: 6px; overflow: hidden; }
+@media (max-width: 640px), (pointer: coarse) and (max-height: 520px) {
+    .drag-handle { display: inline-flex; align-items: center; justify-content: center; width: 36px; height: 40px; margin-left: -8px; color: var(--faint); }
+}
+
+/* ---- Directory Report: the switch, and changes from what the INC Directory has ---- */
+.dir-toggle { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 12px 14px; border: 1px solid var(--line-2); border-radius: 10px; background: var(--bg-2); }
+.dir-toggle > span { font-weight: 600; color: var(--ink); }
+.dir-toggle input[type="checkbox"] { width: 18px; height: 18px; }
+.directory-row.is-changed select,
+.directory-row.is-changed input,
+.field.is-changed input { border-color: var(--amber); box-shadow: 0 0 0 1px var(--amber); }
+.dir-was { grid-column: 1 / -1; margin-top: -2px; color: var(--amber); font-size: 12px; font-weight: 500; }
+.dir-was[hidden] { display: none; }
+.field.is-changed > span::after { content: " · Changed"; color: var(--amber); font-weight: 500; }
+@media (max-width: 640px), (pointer: coarse) and (max-height: 520px) {
+    .generator-inline .dir-toggle { min-height: 56px; }
+    .generator-inline .dir-toggle input[type="checkbox"] {
+        appearance: none; position: relative; flex: none; width: 46px; height: 28px; margin: 0; border-radius: 14px;
+        background: var(--line-3); transition: background .2s ease;
+    }
+    .generator-inline .dir-toggle input[type="checkbox"]::before {
+        content: ""; position: absolute; top: 3px; left: 3px; width: 22px; height: 22px; border-radius: 50%;
+        background: #fff; box-shadow: 0 1px 3px rgb(0 0 0 / 30%); transition: transform .2s ease;
+    }
+    .generator-inline .dir-toggle input[type="checkbox"]:checked { background: var(--blue); }
+    .generator-inline .dir-toggle input[type="checkbox"]:checked::before { transform: translateX(18px); }
+}
+
+.field.dir-toggle { flex-direction: row; align-items: center; justify-content: space-between; text-align: left; }
+@media (max-width: 640px), (pointer: coarse) and (max-height: 520px) {
+    .generator-inline .directory-row { grid-template-columns: 1.25fr 1.1fr 1fr; gap: 6px; }
+    .generator-inline .directory-row select, .generator-inline .directory-row input { padding-left: 8px; padding-right: 4px; font-size: 14px; }
+}
+.field.dir-toggle { padding: 12px 14px; }

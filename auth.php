@@ -70,21 +70,31 @@ final class DatabaseSessionHandler implements SessionHandlerInterface
         return true;
     }
 
+    private array $loaded = [];
+
     public function read(string $id): string|false
     {
         $statement = $this->pdo->prepare('SELECT data FROM app_sessions WHERE id = :id AND expires_at > :now');
         $statement->execute(['id' => hash('sha256', $id), 'now' => time()]);
         $data = $statement->fetchColumn();
-        return $data === false ? '' : (string) $data;
+        $this->loaded[$id] = $data === false ? null : (string) $data;
+        return $this->loaded[$id] ?? '';
     }
 
+    // One atomic upsert, so a page's parallel requests never see the session missing for a moment
+    // (a delete-then-insert let one request read "signed out" and save that over the real session).
     public function write(string $id, string $data): bool
     {
-        $userId = (int) ($_SESSION['user_id'] ?? 0);
-        $this->pdo->prepare('DELETE FROM app_sessions WHERE id = :id')->execute(['id' => hash('sha256', $id)]);
-        $this->pdo->prepare('INSERT INTO app_sessions (id, user_id, data, expires_at) VALUES (:id, :user_id, :data, :expires)')->execute([
+        $before = $this->loaded[$id] ?? null;
+        if ($before === null && $data === '') {
+            return true; // Nothing to keep for a visitor with an empty session.
+        }
+        $this->pdo->prepare(
+            'INSERT INTO app_sessions (id, user_id, data, expires_at) VALUES (:id, :user_id, :data, :expires)
+             ON DUPLICATE KEY UPDATE user_id = VALUES(user_id), data = VALUES(data), expires_at = VALUES(expires_at)'
+        )->execute([
             'id' => hash('sha256', $id),
-            'user_id' => $userId,
+            'user_id' => (int) ($_SESSION['user_id'] ?? 0),
             'data' => $data,
             'expires' => time() + SESSION_IDLE_SECONDS,
         ]);
@@ -180,7 +190,7 @@ function findUser(PDO $pdo, int $id): ?array
 
 // ---------------------------------------------------------------- email (Gmail SMTP)
 
-function smtpSend(string $to, string $subject, string $text): void
+function smtpSend(string $to, string $subject, string $text, ?string $html = null): void
 {
     $user = env('SMTP_USER');
     $password = str_replace(' ', '', env('SMTP_APP_PASSWORD'));
@@ -217,19 +227,82 @@ function smtpSend(string $to, string $subject, string $text): void
     $say("RCPT TO:<{$to}>", '250');
     $say('DATA', '354');
     $headers = [
-        'From: TSV Secretary <' . $user . '>',
+        'From: LTSVSS <' . $user . '>',
         'To: <' . $to . '>',
         'Subject: =?UTF-8?B?' . base64_encode($subject) . '?=',
         'Date: ' . date('r'),
         'Message-ID: <' . bin2hex(random_bytes(12)) . '@tsv-secretary>',
         'MIME-Version: 1.0',
-        'Content-Type: text/plain; charset=UTF-8',
-        'Content-Transfer-Encoding: base64',
     ];
-    $body = chunk_split(base64_encode($text));
+    if ($html === null) {
+        $headers[] = 'Content-Type: text/plain; charset=UTF-8';
+        $headers[] = 'Content-Transfer-Encoding: base64';
+        $body = chunk_split(base64_encode($text));
+    } else {
+        // Plain text for mail apps that want it, the designed HTML for everyone else.
+        $boundary = 'tsv-' . bin2hex(random_bytes(12));
+        $headers[] = "Content-Type: multipart/alternative; boundary=\"{$boundary}\"";
+        $body = "--{$boundary}\r\nContent-Type: text/plain; charset=UTF-8\r\nContent-Transfer-Encoding: base64\r\n\r\n"
+            . chunk_split(base64_encode($text))
+            . "--{$boundary}\r\nContent-Type: text/html; charset=UTF-8\r\nContent-Transfer-Encoding: base64\r\n\r\n"
+            . chunk_split(base64_encode($html))
+            . "--{$boundary}--";
+    }
     $say(implode("\r\n", $headers) . "\r\n\r\n" . $body . "\r\n.", '250');
     fwrite($socket, "QUIT\r\n");
     fclose($socket);
+}
+
+/**
+ * The branded HTML email: logo header, a heading, a short message, then either a big code or a button.
+ * Built with tables and inline styles because that is what Gmail, Outlook and phone mail apps render reliably.
+ */
+function emailHtml(string $heading, string $intro, ?string $code, ?array $button, string $note): string
+{
+    $e = static fn(string $v): string => htmlspecialchars($v, ENT_QUOTES, 'UTF-8');
+    $logo = $e(siteUrl() . '/logo.png');
+    $font = "font-family:'Segoe UI',Roboto,Helvetica,Arial,sans-serif;";
+    $highlight = '';
+    if ($code !== null) {
+        $spaced = $e(substr($code, 0, 3) . ' ' . substr($code, 3));
+        $highlight = "<tr><td align=\"center\" style=\"padding:8px 40px 28px;\">
+            <div style=\"display:inline-block;padding:18px 28px;background:#FFF8E6;border:1px solid #FBD77A;border-radius:12px;{$font}font-size:34px;font-weight:700;letter-spacing:8px;color:#1F2937;\">{$spaced}</div>
+        </td></tr>";
+    }
+    if ($button !== null) {
+        [$label, $url] = $button;
+        $highlight = "<tr><td align=\"center\" style=\"padding:8px 40px 20px;\">
+            <a href=\"{$e($url)}\" style=\"display:inline-block;padding:14px 28px;background:#FBBA24;border-radius:10px;{$font}font-size:15px;font-weight:600;color:#1F2937;text-decoration:none;\">{$e($label)}</a>
+        </td></tr>
+        <tr><td style=\"padding:0 40px 24px;{$font}font-size:12px;line-height:18px;color:#6B7280;word-break:break-all;\">If the button doesn't work, copy this link into your browser:<br><a href=\"{$e($url)}\" style=\"color:#B7791F;\">{$e($url)}</a></td></tr>";
+    }
+    $year = date('Y');
+    return <<<HTML
+<!doctype html>
+<html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>{$e($heading)}</title></head>
+<body style="margin:0;padding:0;background:#F3F4F6;">
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:#F3F4F6;padding:32px 12px;">
+<tr><td align="center">
+  <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="max-width:520px;background:#FFFFFF;border-radius:16px;overflow:hidden;border:1px solid #E5E7EB;">
+    <tr><td style="background:#111111;padding:20px 40px;">
+      <table role="presentation" cellpadding="0" cellspacing="0"><tr>
+        <td style="vertical-align:middle;"><img src="{$logo}" width="32" height="32" alt="" style="display:block;border:0;"></td>
+        <td style="vertical-align:middle;padding-left:12px;{$font}font-size:16px;font-weight:700;color:#FFFFFF;letter-spacing:0.3px;">LTSVSS<span style="color:#9CA3AF;font-weight:400;"> &nbsp;Locale TSV Secretary System</span></td>
+      </tr></table>
+    </td></tr>
+    <tr><td style="height:4px;background:#FBBA24;font-size:0;line-height:0;">&nbsp;</td></tr>
+    <tr><td style="padding:32px 40px 8px;{$font}font-size:22px;font-weight:700;color:#111827;">{$e($heading)}</td></tr>
+    <tr><td style="padding:0 40px 20px;{$font}font-size:15px;line-height:23px;color:#374151;">{$e($intro)}</td></tr>
+    {$highlight}
+    <tr><td style="padding:0 40px 32px;{$font}font-size:13px;line-height:20px;color:#6B7280;border-top:1px solid #F3F4F6;padding-top:20px;">{$e($note)}</td></tr>
+  </table>
+  <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="max-width:520px;">
+    <tr><td align="center" style="padding:18px 20px;{$font}font-size:12px;line-height:18px;color:#9CA3AF;">This is an automatic message from the Locale TSV Secretary System. Please don't reply.<br>&copy; {$year} LTSVSS</td></tr>
+  </table>
+</td></tr>
+</table>
+</body></html>
+HTML;
 }
 
 function siteUrl(): string
@@ -282,10 +355,12 @@ function issueLoginCode(PDO $pdo, array $user): void
         'hash' => password_hash($code, PASSWORD_DEFAULT),
         'expires' => time() + LOGIN_CODE_SECONDS,
     ]);
+    $note = 'If you did not try to sign in, someone may know your password. Change it, or tell your superadmin right away.';
     smtpSend(
         $user['email'],
-        "TSV Secretary sign-in code: {$code}",
-        "Your sign-in code is: {$code}\n\nIt works once and expires in 10 minutes.\n\nIf you did not try to sign in, someone may know your password. Change it, or tell the superadmin."
+        "{$code} is your LTSVSS sign-in code",
+        "Your sign-in code is: {$code}\n\nIt works once and expires in 10 minutes.\n\n{$note}",
+        emailHtml('Your sign-in code', 'Enter this code on the sign-in page to finish signing in. It works once and expires in 10 minutes.', $code, null, $note)
     );
 }
 
@@ -308,6 +383,7 @@ function requireSignIn(PDO $pdo): array
     // Not signed in: background requests get a plain "401", pages get the sign-in form.
     if (in_array($_GET['action'] ?? '', ['ping', 'memory_photo', 'memory_video', 'suguan_data', 'memories_data'], true)
         || str_contains(strtolower($_SERVER['HTTP_ACCEPT'] ?? ''), 'application/json')) {
+        session_abort();
         http_response_code(401);
         header('Content-Type: application/json; charset=utf-8');
         echo json_encode(['success' => false, 'message' => 'Signed out. Reload the page to sign in again.']);
@@ -498,7 +574,7 @@ function authPage(string $title, callable $body): never
         try { document.documentElement.dataset.theme = localStorage.getItem('theme') === 'light' ? 'light' : 'dark'; } catch { document.documentElement.dataset.theme = 'dark'; }
     </script>
     <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600;700&family=Geist+Mono:wght@400;500&display=swap">
-    <link rel="stylesheet" href="style.css?v=29">
+    <link rel="stylesheet" href="style.css?v=30">
     <style>
         .auth-wrap { min-height: 100vh; display: grid; place-items: center; padding: 24px; }
         .auth-card { width: min(420px, 100%); padding: 28px; display: grid; gap: 16px; }
@@ -510,7 +586,7 @@ function authPage(string $title, callable $body): never
 <body>
 <div class="auth-wrap">
     <div class="panel auth-card">
-        <div class="auth-brand"><span class="team-avatar" aria-hidden="true"></span><span>TSV Secretary</span></div>
+        <div class="auth-brand"><span class="team-avatar" aria-hidden="true"></span><span>LTSVSS</span></div>
         <h1><?= h($title) ?></h1>
         <?php $body(); ?>
     </div>
@@ -532,11 +608,15 @@ function sendInvite(PDO $pdo, array $user, bool $reset): void
         'id' => $user['id'],
     ]);
     $link = siteUrl() . '/index.php?action=set_password&token=' . $token;
+    $intro = $reset
+        ? 'A password reset was requested for your LTSVSS account. Choose a new password with the button below. The link works for 3 days.'
+        : 'Hi ' . $user['name'] . ', an account was made for you on the Locale TSV Secretary System. Choose your password with the button below to get started. The link works for 3 days.';
+    $note = 'After that, sign in at ' . siteUrl() . ' with your email and password. Each time, we will also email you a 6-digit code. If you were not expecting this email, you can ignore it.';
     smtpSend(
         $user['email'],
-        $reset ? 'Reset your TSV Secretary password' : 'Your TSV Secretary account',
-        ($reset ? "A password reset was requested for your TSV Secretary account.\n\n" : "An account was made for you on the TSV Secretary website.\n\n")
-        . "Choose your password here (the link works for 3 days):\n{$link}\n\nAfter that, sign in at " . siteUrl() . "/ with your email, your password and the code we email you."
+        $reset ? 'Reset your LTSVSS password' : 'Your LTSVSS account is ready',
+        $intro . "\n\nChoose your password here:\n{$link}\n\n{$note}",
+        emailHtml($reset ? 'Reset your password' : 'Welcome to LTSVSS', $intro, null, [$reset ? 'Choose a new password' : 'Set my password', $link], $note)
     );
 }
 
@@ -669,7 +749,7 @@ function authPageWide(string $title, callable $body): never
         try { document.documentElement.dataset.theme = localStorage.getItem('theme') === 'light' ? 'light' : 'dark'; } catch { document.documentElement.dataset.theme = 'dark'; }
     </script>
     <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600;700&family=Geist+Mono:wght@400;500&display=swap">
-    <link rel="stylesheet" href="style.css?v=29">
+    <link rel="stylesheet" href="style.css?v=30">
     <style>
         .accounts-wrap { max-width: 1100px; margin: 0 auto; padding: 28px 20px; display: grid; gap: 18px; }
         .accounts-head { display: flex; justify-content: space-between; align-items: center; gap: 12px; }

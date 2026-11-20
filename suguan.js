@@ -13,9 +13,9 @@ const weekMeta = document.querySelector('[data-week-meta]');
 const currentWeekButton = document.querySelector('[data-week-step="current"]');
 const ewsTypes = ['katandaan', 'pnk'];
 const roles = [
-    ['computer', 'Computer'],
-    ['video', 'Video'],
-    ['audio', 'Audio'],
+    ['computer', 'Computer Operator'],
+    ['video', 'Video Operator'],
+    ['audio', 'Audio Operator'],
 ];
 const icons = {
     grip: '<svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor" aria-hidden="true"><circle cx="9" cy="6" r="1.6"/><circle cx="15" cy="6" r="1.6"/><circle cx="9" cy="12" r="1.6"/><circle cx="15" cy="12" r="1.6"/><circle cx="9" cy="18" r="1.6"/><circle cx="15" cy="18" r="1.6"/></svg>',
@@ -24,7 +24,12 @@ const icons = {
     trash: '<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M3 6h18M8 6V4h8v2M19 6l-1 14H6L5 6"/></svg>',
     x: '<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M18 6 6 18M6 6l12 12"/></svg>',
     plus: '<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>',
+    edit: '<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4Z"/></svg>',
 };
+
+// On a phone each service card shows only its day, time and roles; Edit opens its date, time and type.
+// The open cards are remembered here because the list is redrawn after every change.
+const editingIds = new Set();
 
 let services = suguanData.services;
 let selectedName = null;
@@ -32,7 +37,8 @@ let armedSlot = null;
 let saveTimeout;
 let savePromise = Promise.resolve();
 let dirty = false;
-let draggedId = null;
+// The phone layout (the Android app): tap instead of click, and no Esc key.
+const touchLayout = () => window.matchMedia('(max-width: 640px), (pointer: coarse) and (max-height: 520px)').matches;
 
 function newId() {
     return Math.random().toString(36).slice(2, 14);
@@ -131,11 +137,13 @@ function assign(serviceId, role, name) {
 
 function updateHint() {
     if (selectedName) {
-        pickerHint.textContent = `Click a role to assign ${selectedName}. Press Esc to stop.`;
+        pickerHint.textContent = touchLayout()
+            ? `Tap a role to assign ${selectedName}. Tap the name again to stop.`
+            : `Click a role to assign ${selectedName}. Press Esc to stop.`;
     } else if (armedSlot) {
         pickerHint.textContent = 'Now click a name to fill the highlighted role.';
     } else {
-        pickerHint.textContent = 'Pick a name, then click a role below.';
+        pickerHint.textContent = touchLayout() ? 'Tap a name, then tap a role below.' : 'Pick a name, then click a role below.';
     }
 }
 
@@ -189,6 +197,10 @@ function renderRoleSlot(service, role, label) {
     assignButton.append(element('span', 'role-label', label));
     assignButton.append(element('span', 'role-name', name || 'Assign'));
     assignButton.addEventListener('click', () => {
+        if (touchLayout()) {
+            openOfficerSheet(service, role, label);
+            return;
+        }
         if (selectedName) {
             assign(service.id, role, selectedName);
             return;
@@ -222,6 +234,102 @@ function renderRoleSlot(service, role, label) {
     return slot;
 }
 
+// ---- Phones: tap a role, then pick the officer from a list that slides up from the bottom ----
+let openSheet = null;
+
+function closeOfficerSheet({ fromHistory = false } = {}) {
+    if (!openSheet) {
+        return;
+    }
+    const sheet = openSheet;
+    openSheet = null;
+    sheet.classList.add('is-leaving');
+    window.setTimeout(() => sheet.remove(), 200);
+    document.body.classList.remove('has-sheet');
+    // The sheet added a history step so Android's Back button closes it; undo that step.
+    if (!fromHistory && window.history.state?.officerSheet) {
+        window.history.back();
+    }
+}
+
+window.addEventListener('popstate', () => closeOfficerSheet({ fromHistory: true }));
+
+function openOfficerSheet(service, role, label) {
+    closeOfficerSheet();
+    const counts = {};
+    services.forEach((item) => roles.forEach(([other]) => {
+        if (item[other]) {
+            counts[item[other]] = (counts[item[other]] || 0) + 1;
+        }
+    }));
+    const current = service[role];
+    const date = parseDate(service.date);
+    const when = Number.isNaN(date.getTime())
+        ? formatTime(service.time)
+        : `${date.toLocaleDateString('en-US', { weekday: 'long', month: 'short', day: 'numeric' })} · ${formatTime(service.time)}`;
+
+    const sheet = element('div', 'officer-sheet');
+    sheet.setAttribute('role', 'dialog');
+    sheet.setAttribute('aria-modal', 'true');
+    sheet.setAttribute('aria-label', `Choose the ${label} operator`);
+    const backdrop = element('div', 'officer-sheet-backdrop');
+    backdrop.addEventListener('click', () => closeOfficerSheet());
+    const panel = element('div', 'officer-sheet-panel');
+    const head = element('div', 'officer-sheet-head');
+    head.append(element('strong', '', label), element('span', 'muted', when));
+    const list = element('div', 'officer-sheet-list');
+
+    suguanData.officers.forEach((name) => {
+        const row = element('button', 'officer-sheet-row');
+        row.type = 'button';
+        const isCurrent = name === current;
+        row.classList.toggle('is-current', isCurrent);
+        const otherRole = roles.find(([other]) => other !== role && service[other] === name);
+        const text = element('span', 'officer-sheet-name');
+        text.append(element('span', '', name));
+        const detail = [`${counts[name] || 0} ${counts[name] === 1 ? 'duty' : 'duties'} this week`];
+        if (otherRole) {
+            detail.push(`already ${otherRole[1]} here`);
+        }
+        text.append(element('small', otherRole ? 'is-warning' : 'muted', detail.join(' · ')));
+        row.append(text);
+        if (isCurrent) {
+            row.append(element('span', 'officer-sheet-check', '✓'));
+        }
+        row.addEventListener('click', () => {
+            closeOfficerSheet();
+            assign(service.id, role, name);
+        });
+        list.append(row);
+    });
+    if (!suguanData.officers.length) {
+        list.append(element('p', 'muted officer-sheet-empty', 'No active officers yet. Add officers on the Overview page.'));
+    }
+
+    const actions = element('div', 'officer-sheet-actions');
+    if (current) {
+        const clear = element('button', 'button button-light', 'Leave empty');
+        clear.type = 'button';
+        clear.addEventListener('click', () => {
+            closeOfficerSheet();
+            assign(service.id, role, '');
+        });
+        actions.append(clear);
+    }
+    const cancel = element('button', 'button button-light', 'Cancel');
+    cancel.type = 'button';
+    cancel.addEventListener('click', () => closeOfficerSheet());
+    actions.append(cancel);
+
+    panel.append(element('span', 'officer-sheet-grip'), head, list, actions);
+    sheet.append(backdrop, panel);
+    document.body.append(sheet);
+    document.body.classList.add('has-sheet');
+    openSheet = sheet;
+    window.history.pushState({ officerSheet: true }, '');
+    list.querySelector('.is-current')?.scrollIntoView({ block: 'center' });
+}
+
 function addServiceAfter(index) {
     const reference = services[index] ?? services[services.length - 1];
     const service = {
@@ -236,6 +344,7 @@ function addServiceAfter(index) {
         audio: '',
     };
     services.splice(index + 1, 0, service);
+    editingIds.add(service.id);
     changed();
     serviceList.querySelector(`[data-id="${service.id}"] input[type="time"]`)?.focus();
 }
@@ -256,12 +365,14 @@ function renderService(service, index) {
     card.classList.toggle('is-ews', service.ews);
 
     const head = element('div', 'service-head');
-    const handle = iconButton(icons.grip, 'Drag to reorder', 'drag-handle');
-    handle.addEventListener('pointerdown', () => {
-        card.draggable = true;
-    });
-    handle.addEventListener('pointerup', () => {
-        card.draggable = false;
+    const handle = iconButton(icons.grip, 'Drag to move', 'drag-handle');
+    handle.addEventListener('pointerdown', (event) => startReorder(event, service.id, card, handle));
+    handle.addEventListener('keydown', (event) => {
+        if (event.key === 'ArrowUp' || event.key === 'ArrowDown') {
+            event.preventDefault();
+            moveService(index, index + (event.key === 'ArrowUp' ? -1 : 1));
+            serviceList.querySelector(`[data-id="${service.id}"] .drag-handle`)?.focus();
+        }
     });
     head.append(handle);
 
@@ -286,12 +397,20 @@ function renderService(service, index) {
     head.append(badges);
 
     const actions = element('div', 'service-actions');
-    const up = iconButton(icons.up, 'Move up');
-    up.disabled = index === 0;
-    up.addEventListener('click', () => moveService(index, index - 1));
-    const down = iconButton(icons.down, 'Move down');
-    down.disabled = index === services.length - 1;
-    down.addEventListener('click', () => moveService(index, index + 1));
+    card.classList.toggle('is-editing', editingIds.has(service.id));
+    const edit = iconButton(icons.edit, 'Edit the date, time and type', 'icon-button icon-button-small service-edit');
+    edit.setAttribute('aria-expanded', String(editingIds.has(service.id)));
+    edit.addEventListener('click', () => {
+        const open = !editingIds.has(service.id);
+        if (open) {
+            editingIds.add(service.id);
+        } else {
+            editingIds.delete(service.id);
+        }
+        card.classList.toggle('is-editing', open);
+        edit.setAttribute('aria-expanded', String(open));
+    });
+    actions.append(edit);
     const remove = iconButton(icons.trash, 'Delete service', 'icon-button icon-button-small icon-button-danger');
     remove.addEventListener('click', () => {
         if (window.confirm('Delete this service from the Suguan?')) {
@@ -299,7 +418,7 @@ function renderService(service, index) {
             changed();
         }
     });
-    actions.append(up, down, remove);
+    actions.append(remove);
     head.append(actions);
     card.append(head);
 
@@ -361,21 +480,6 @@ function renderService(service, index) {
     roles.forEach(([role, label]) => slots.append(renderRoleSlot(service, role, label)));
     card.append(slots);
 
-    card.addEventListener('dragstart', (event) => {
-        if (!card.draggable) {
-            return;
-        }
-        draggedId = service.id;
-        event.dataTransfer.effectAllowed = 'move';
-        event.dataTransfer.setData('text/service', service.id);
-        window.requestAnimationFrame(() => card.classList.add('is-dragging'));
-    });
-    card.addEventListener('dragend', () => {
-        card.draggable = false;
-        draggedId = null;
-        card.classList.remove('is-dragging');
-        clearDropMarkers();
-    });
     return card;
 }
 
@@ -399,52 +503,91 @@ function renderInsertRow(index) {
     return row;
 }
 
-function clearDropMarkers() {
-    serviceList.querySelectorAll('.drop-before, .drop-after').forEach((node) => {
-        node.classList.remove('drop-before', 'drop-after');
-    });
-}
+// ---- Reordering: press the grip and drag the service to where it belongs ----
+// The card follows the pointer, a dashed gap shows where it will land, and the page scrolls near the edges.
+function startReorder(event, serviceId, card, handle) {
+    if (event.button !== 0 && event.pointerType === 'mouse') {
+        return;
+    }
+    event.preventDefault();
+    const box = card.getBoundingClientRect();
+    const offsetY = event.clientY - box.top;
+    const gap = element('div', 'service-drop-gap');
+    gap.style.height = `${box.height}px`;
+    card.after(gap);
+    Object.assign(card.style, { position: 'fixed', left: `${box.left}px`, top: `${box.top}px`, width: `${box.width}px`, zIndex: '60' });
+    card.classList.add('is-lifted');
+    serviceList.classList.add('is-reordering');
+    document.body.classList.add('is-reordering');
+    try {
+        handle.setPointerCapture(event.pointerId);
+    } catch {
+        // Only real pointers can be captured.
+    }
 
-function dropTarget(event) {
-    const cards = [...serviceList.querySelectorAll('.service-card:not(.is-dragging)')];
-    for (const card of cards) {
-        const box = card.getBoundingClientRect();
-        if (event.clientY < box.top + box.height / 2) {
-            return { card, before: true };
+    let lastY = event.clientY;
+    let scrollTimer = null;
+    const placeGap = () => {
+        const cards = [...serviceList.querySelectorAll('.service-card:not(.is-lifted)')];
+        const before = cards.find((other) => {
+            const rect = other.getBoundingClientRect();
+            return lastY < rect.top + rect.height / 2;
+        });
+        if (before) {
+            if (gap.nextElementSibling !== before) {
+                before.before(gap);
+            }
+        } else if (cards.length && gap.previousElementSibling !== cards[cards.length - 1]) {
+            cards[cards.length - 1].after(gap);
         }
-    }
-    return cards.length ? { card: cards[cards.length - 1], before: false } : null;
+    };
+    const edgeScroll = () => {
+        const edge = 90;
+        const bottomBar = touchLayout() ? 130 : 0;
+        let speed = 0;
+        if (lastY < edge) {
+            speed = -Math.ceil((edge - lastY) / 6);
+        } else if (lastY > window.innerHeight - edge - bottomBar) {
+            speed = Math.ceil((lastY - (window.innerHeight - edge - bottomBar)) / 6);
+        }
+        if (speed) {
+            window.scrollBy(0, speed);
+            placeGap();
+        }
+        scrollTimer = window.requestAnimationFrame(edgeScroll);
+    };
+    scrollTimer = window.requestAnimationFrame(edgeScroll);
+
+    const move = (moveEvent) => {
+        lastY = moveEvent.clientY;
+        card.style.top = `${lastY - offsetY}px`;
+        placeGap();
+    };
+    const finish = (cancelled) => {
+        window.cancelAnimationFrame(scrollTimer);
+        handle.removeEventListener('pointermove', move);
+        handle.removeEventListener('pointerup', up);
+        handle.removeEventListener('pointercancel', cancel);
+        const order = [...serviceList.querySelectorAll('.service-card:not(.is-lifted), .service-drop-gap')];
+        const toIndex = order.indexOf(gap);
+        gap.remove();
+        card.removeAttribute('style');
+        card.classList.remove('is-lifted');
+        serviceList.classList.remove('is-reordering');
+        document.body.classList.remove('is-reordering');
+        const fromIndex = services.findIndex((item) => item.id === serviceId);
+        if (!cancelled && fromIndex >= 0 && toIndex >= 0 && toIndex !== fromIndex) {
+            moveService(fromIndex, toIndex);
+        } else {
+            render();
+        }
+    };
+    const up = () => finish(false);
+    const cancel = () => finish(true);
+    handle.addEventListener('pointermove', move);
+    handle.addEventListener('pointerup', up);
+    handle.addEventListener('pointercancel', cancel);
 }
-
-serviceList.addEventListener('dragover', (event) => {
-    if (!draggedId) {
-        return;
-    }
-    event.preventDefault();
-    clearDropMarkers();
-    const target = dropTarget(event);
-    target?.card.classList.add(target.before ? 'drop-before' : 'drop-after');
-});
-
-serviceList.addEventListener('drop', (event) => {
-    if (!draggedId) {
-        return;
-    }
-    event.preventDefault();
-    const target = dropTarget(event);
-    const fromIndex = services.findIndex((service) => service.id === draggedId);
-    if (!target || fromIndex < 0) {
-        return;
-    }
-    const [service] = services.splice(fromIndex, 1);
-    let toIndex = services.findIndex((item) => item.id === target.card.dataset.id);
-    if (!target.before) {
-        toIndex += 1;
-    }
-    services.splice(toIndex, 0, service);
-    draggedId = null;
-    changed();
-});
 
 function render() {
     renderChips();
@@ -474,8 +617,25 @@ document.querySelector('[data-suguan-rotate]').addEventListener('click', () => {
     changed();
 });
 
-document.querySelector('[data-suguan-sort]').addEventListener('click', () => {
-    services.sort((a, b) => `${a.date} ${a.time}`.localeCompare(`${b.date} ${b.time}`));
+// Normalize: the week becomes exactly the regular schedule reported in the INC Directory (day, time, PNK, EWS),
+// keeping the operators already assigned; anything else (a Pamamahayag, extra services) is removed.
+document.querySelector('[data-suguan-sort]').addEventListener('click', async () => {
+    const body = new FormData();
+    body.set('csrf_token', suguanData.csrf);
+    body.set('action', 'align_suguan');
+    body.set('week', suguanData.week);
+    body.set('services', JSON.stringify(services));
+    try {
+        const response = await fetch('index.php', { method: 'POST', headers: { Accept: 'application/json', 'X-Requested-With': 'XMLHttpRequest' }, body });
+        const result = await response.json();
+        if (!response.ok || !result.success) {
+            throw new Error(result.message || 'Could not sort.');
+        }
+        services = result.services;
+    } catch (error) {
+        setSaveState(error instanceof Error ? error.message : 'Could not normalize.', 'error');
+        return;
+    }
     changed();
 });
 

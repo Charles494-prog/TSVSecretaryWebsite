@@ -346,16 +346,40 @@ window.TsvPlayer = (() => {
         };
 
         // ---- full screen and picture-in-picture ----
+        let fillScreen = false;
+        const setFillScreen = (on, { fromHistory = false } = {}) => {
+            if (fillScreen === on) return;
+            fillScreen = on;
+            root.classList.toggle('is-fullscreen', on);
+            root.classList.toggle('is-fill-screen', on);
+            document.body.classList.toggle('has-fill-screen', on);
+            setButton('fullscreen', on ? ICON.exitFullscreen : ICON.fullscreen, on ? 'Exit full screen (f)' : 'Full screen (f)');
+            try { window.LtsvssAndroid?.setFullscreen(on); } catch { /* not in the Android app */ }
+            // Android's Back button leaves full screen instead of the page.
+            if (on) {
+                window.history.pushState({ videoFullscreen: true }, '');
+            } else if (!fromHistory && window.history.state?.videoFullscreen) {
+                window.history.back();
+            }
+        };
+        window.addEventListener('popstate', () => setFillScreen(false, { fromHistory: true }));
         const toggleFullscreen = () => {
-            if (document.fullscreenElement === root) {
+            if (fillScreen) {
+                setFillScreen(false);
+            } else if (document.fullscreenElement === root) {
                 document.exitFullscreen();
+            } else if (window.LtsvssAndroid) {
+                setFillScreen(true);
             } else if (root.requestFullscreen) {
-                root.requestFullscreen().catch(() => {});
+                root.requestFullscreen().catch(() => setFillScreen(true));
             } else if (video.webkitEnterFullscreen) {
                 video.webkitEnterFullscreen();
+            } else {
+                setFillScreen(true);
             }
         };
         document.addEventListener('fullscreenchange', () => {
+            if (fillScreen) return;
             const full = document.fullscreenElement === root;
             root.classList.toggle('is-fullscreen', full);
             setButton('fullscreen', full ? ICON.exitFullscreen : ICON.fullscreen, full ? 'Exit full screen (f)' : 'Full screen (f)');

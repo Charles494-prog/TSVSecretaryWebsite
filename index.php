@@ -1393,7 +1393,8 @@ $isEditing = !empty($formValues['id']);
 <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>TSV Officer Masterlist</title>
+    <title>Locale TSV Secretary System</title>
+    <link rel="icon" type="image/png" href="logo.png">
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600;700&family=Geist+Mono:wght@400;500&display=swap">
@@ -1404,14 +1405,14 @@ $isEditing = !empty($formValues['id']);
             document.documentElement.dataset.theme = 'dark';
         }
     </script>
-    <link rel="stylesheet" href="style.css?v=29">
+    <link rel="stylesheet" href="style.css?v=30">
 </head>
 <body>
 <div class="shell">
     <aside class="sidebar">
         <a class="team" href="index.php">
             <span class="team-avatar" aria-hidden="true"></span>
-            <span class="team-name">TSV Secretary</span>
+            <span class="team-name" title="Locale TSV Secretary System">LTSVSS</span>
             <span class="team-badge"><?= h($signatories['locale_name'] ?: 'Locale') ?></span>
         </a>
         <nav class="side-nav" aria-label="Main">
@@ -1441,6 +1442,7 @@ $isEditing = !empty($formValues['id']);
 
     <div class="main">
         <header class="topbar">
+            <a class="mobile-brand" href="index.php"><span class="team-avatar" aria-hidden="true"></span><span>LTSVSS</span></a>
             <div class="crumbs">
                 <a href="index.php">All officers</a>
                 <?php if ($action === 'form'): ?>
@@ -1841,7 +1843,7 @@ $isEditing = !empty($formValues['id']);
 
                 <section class="panel">
                     <div class="table-wrap">
-                        <table>
+                        <table class="officers-table">
                             <thead>
                                 <tr>
                                     <th>Blg.</th>
@@ -1869,10 +1871,10 @@ $isEditing = !empty($formValues['id']);
                                 <?php else: ?>
                                     <?php foreach ($officers as $officer): ?>
                                         <tr data-officer-row data-active="<?= $officer['is_active'] ? '1' : '0' ?>">
-                                            <td class="mono muted"><?= h((string) ($officer['masterlist_number'] ?? '')) ?></td>
+                                            <td class="mono muted cell-blg"><?= h((string) ($officer['masterlist_number'] ?? '')) ?></td>
                                             <td class="name-cell"><?= h($officer['name']) ?></td>
-                                            <td class="muted"><?= h($officer['tungkulin']) ?></td>
-                                            <td>
+                                            <td class="muted cell-role"><?= h($officer['tungkulin']) ?></td>
+                                            <td class="cell-status">
                                                 <form method="post" action="index.php" class="status-toggle-form" data-status-toggle>
                                                     <input type="hidden" name="csrf_token" value="<?= h($_SESSION['csrf_token']) ?>">
                                                     <input type="hidden" name="action" value="toggle_status">
@@ -1880,10 +1882,15 @@ $isEditing = !empty($formValues['id']);
                                                     <button class="status status-toggle <?= $officer['is_active'] ? 'status-active' : 'status-inactive' ?>" type="submit" aria-label="Set <?= h($officer['name']) ?> to <?= $officer['is_active'] ? 'inactive' : 'active' ?>" title="Click to change status"><?= $officer['is_active'] ? 'Active' : 'Inactive' ?></button>
                                                 </form>
                                             </td>
-                                            <td class="muted"><?= h(displayRecordDate($officer['oath_taking_date'], $officer['oath_taking_text'])) ?></td>
-                                            <td class="muted"><?= h(displayRecordDate($officer['ndi_signing_date'], $officer['ndi_signing_text'])) ?></td>
-                                            <td class="muted"><?= h(displayDate($officer['birthday'])) ?></td>
-                                            <td class="mono"><?= h($officer['contact_telegram'] ?? '') ?></td>
+                                            <?php $cells = [
+                                                ['muted', 'Oath-taking', displayRecordDate($officer['oath_taking_date'], $officer['oath_taking_text'])],
+                                                ['muted', 'NDA signing', displayRecordDate($officer['ndi_signing_date'], $officer['ndi_signing_text'])],
+                                                ['muted', 'Birthday', displayDate($officer['birthday'])],
+                                                ['mono', 'Telegram #', (string) ($officer['contact_telegram'] ?? '')],
+                                            ]; ?>
+                                            <?php foreach ($cells as [$cellClass, $cellLabel, $cellValue]): ?>
+                                                <td class="<?= $cellClass ?> cell-detail" data-label="<?= h($cellLabel) ?>"<?= $cellValue === '' || $cellValue === '—' ? ' data-empty' : '' ?>><?= h($cellValue) ?></td>
+                                            <?php endforeach; ?>
                                             <td class="row-actions">
                                                 <a class="row-icon" href="index.php?action=form&amp;id=<?= h((string) $officer['id']) ?>" aria-label="Edit <?= h($officer['name']) ?>" title="Edit"><?= icon('pen') ?></a>
                                                 <form method="post" action="index.php" data-confirm="<?= h($officer['name']) ?> will be removed from the masterlist. This cannot be undone." data-confirm-title="Delete this officer?" data-confirm-button="Delete">
@@ -2156,9 +2163,9 @@ $isEditing = !empty($formValues['id']);
 </dialog>
 <div class="toast-region" data-toasts aria-live="polite"></div>
 <?php if ($toast): ?><script type="application/json" id="toast-data"><?= json_encode($toast, JSON_HEX_TAG | JSON_HEX_AMP | JSON_HEX_APOS | JSON_HEX_QUOT) ?></script><?php endif; ?>
-<script src="datepicker.js?v=2"></script>
-<script src="app.js?v=23"></script>
-<?php if ($action === 'list'): ?><script src="suguan.js?v=5"></script><?php endif; ?>
-<?php if ($action === 'memories'): ?><script src="player.js?v=2"></script><script src="memories.js?v=7"></script><?php endif; ?>
+<script src="datepicker.js?v=3"></script>
+<script src="app.js?v=30"></script>
+<?php if ($action === 'list'): ?><script src="suguan.js?v=30"></script><?php endif; ?>
+<?php if ($action === 'memories'): ?><script src="player.js?v=3"></script><script src="memories.js?v=30"></script><?php endif; ?>
 </body>
 </html>

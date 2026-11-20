@@ -9,6 +9,11 @@
     const csrf = data.csrf;
     const today = data.today;
     let posts = data.posts;
+    // The page shows one collection: TSV Memories or Formal Activities. They work the same; only the words differ.
+    const category = data.category === 'activities' ? 'activities' : 'memories';
+    const noun = category === 'activities'
+        ? { one: 'activity', many: 'activities', One: 'Activity', Many: 'Activities' }
+        : { one: 'memory', many: 'memories', One: 'Memory', Many: 'Memories' };
 
     const MONTHS = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'];
     const WEEKDAYS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
@@ -98,6 +103,7 @@
         const body = new FormData();
         body.set('csrf_token', csrf);
         body.set('action', action);
+        body.set('category', category);
         Object.entries(fields).forEach(([key, value]) => {
             if (Array.isArray(value)) {
                 value.forEach((item) => body.append(`${key}[]`, item));
@@ -121,7 +127,7 @@
     }
 
     async function reload() {
-        const response = await fetch('index.php?action=memories_data', { headers: { Accept: 'application/json' }, cache: 'no-store' });
+        const response = await fetch(`index.php?action=memories_data&category=${category}`, { headers: { Accept: 'application/json' }, cache: 'no-store' });
         posts = (await response.json()).posts;
         render();
     }
@@ -186,7 +192,7 @@
             const img = el('img');
             img.loading = 'lazy';
             img.decoding = 'async';
-            img.alt = postData.caption ? postData.caption.slice(0, 120) : `Memory from ${longDate(postData.date)}`;
+            img.alt = postData.caption ? postData.caption.slice(0, 120) : `${noun.One} from ${longDate(postData.date)}`;
             // A single photo shows at its own shape; collages use the thumbnails.
             img.src = photos.length === 1 ? photoUrl(photo.id) : photoUrl(photo.id, 'thumb');
             if (photos.length === 1) {
@@ -268,7 +274,7 @@
         const box = el('div', 'memories-empty');
         const art = el('div', 'memories-empty-icon');
         art.innerHTML = ICONS.image;
-        const button = el('button', 'button', 'New memory');
+        const button = el('button', 'button', `New ${noun.one}`);
         button.type = 'button';
         button.addEventListener('click', () => openComposer());
         box.append(art, el('strong', '', message), el('p', 'muted', 'Photos and videos you add are kept here by date and saved in your Export SQL backups.'), button);
@@ -292,7 +298,7 @@
         byMonth(list).forEach((group, key) => {
             const section = el('section', 'timeline-month');
             const heading = el('h2', 'timeline-month-label');
-            heading.append(el('span', '', monthLabel(key)), el('span', 'muted', `${group.length} ${group.length === 1 ? 'memory' : 'memories'}`));
+            heading.append(el('span', '', monthLabel(key)), el('span', 'muted', `${group.length} ${group.length === 1 ? noun.one : noun.many}`));
             section.append(heading);
             group.forEach((postData) => section.append(postCard(postData)));
             wrap.append(section);
@@ -315,7 +321,7 @@
                 const img = el('img');
                 img.loading = 'lazy';
                 img.decoding = 'async';
-                img.alt = item.post.caption ? item.post.caption.slice(0, 120) : `Memory from ${longDate(item.post.date)}`;
+                img.alt = item.post.caption ? item.post.caption.slice(0, 120) : `${noun.One} from ${longDate(item.post.date)}`;
                 img.src = photoUrl(item.photo.id, 'thumb');
                 button.append(img);
                 if (item.photo.video) button.append(playBadge(item.photo, true));
@@ -358,9 +364,27 @@
         };
         prev.addEventListener('click', () => step(-1));
         next.addEventListener('click', () => step(1));
+        // Swipe left for the next month, right for the previous one (a mostly sideways swipe).
+        let swipeStart = null;
+        wrap.addEventListener('touchstart', (event) => {
+            const touch = event.changedTouches[0];
+            swipeStart = { x: touch.clientX, y: touch.clientY, time: Date.now() };
+        }, { passive: true });
+        wrap.addEventListener('touchend', (event) => {
+            if (!swipeStart) return;
+            const touch = event.changedTouches[0];
+            const dx = touch.clientX - swipeStart.x;
+            const dy = touch.clientY - swipeStart.y;
+            const quick = Date.now() - swipeStart.time < 800;
+            swipeStart = null;
+            if (quick && Math.abs(dx) > 50 && Math.abs(dx) > Math.abs(dy) * 1.5) {
+                wrap.classList.add(dx < 0 ? 'is-swiping-next' : 'is-swiping-prev');
+                step(dx < 0 ? 1 : -1);
+            }
+        }, { passive: true });
         const monthCount = list.filter((p) => p.date.startsWith(calendarCursor)).length;
         const label = el('div', 'calendar-label');
-        label.append(el('strong', '', `${MONTHS[cm - 1]} ${cy}`), el('span', 'muted', monthCount ? `${monthCount} ${monthCount === 1 ? 'memory' : 'memories'}` : 'No memories this month'));
+        label.append(el('strong', '', `${MONTHS[cm - 1]} ${cy}`), el('span', 'muted', monthCount ? `${monthCount} ${monthCount === 1 ? noun.one : noun.many}` : `No ${noun.many} this month`));
         head.append(prev, label, next);
 
         const grid = el('div', 'calendar-grid');
@@ -381,7 +405,7 @@
             if (dayPosts.length) {
                 cell.type = 'button';
                 cell.classList.add('has-memories');
-                cell.setAttribute('aria-label', `${longDate(iso)}: ${dayPosts.length} ${dayPosts.length === 1 ? 'memory' : 'memories'}`);
+                cell.setAttribute('aria-label', `${longDate(iso)}: ${dayPosts.length} ${dayPosts.length === 1 ? noun.one : noun.many}`);
                 const covers = dayPosts.map((p) => p.photos[0]).filter(Boolean).slice(0, 4);
                 if (covers.length) {
                     const mosaic = el('span', `calendar-mosaic calendar-mosaic-${covers.length}`);
@@ -461,7 +485,7 @@
         const card = el('article', 'journey-card');
         card.tabIndex = 0;
         card.setAttribute('role', 'button');
-        card.setAttribute('aria-label', `Open the memory from ${longDate(postData.date)}`);
+        card.setAttribute('aria-label', `Open the ${noun.one} from ${longDate(postData.date)}`);
         card.style.setProperty('--i', String(Math.min(index, 14)));
         const when = el('header', 'journey-when');
         when.append(el('strong', '', longDate(postData.date)), el('span', 'muted', `${weekday(postData.date)} · ${mediaCount(postData.photos)}`));
@@ -492,7 +516,7 @@
         const wrap = el('div', 'journey');
         const scroller = el('div', 'journey-scroller');
         scroller.tabIndex = 0;
-        scroller.setAttribute('aria-label', 'Memories from oldest to newest. Use the arrow keys to move along.');
+        scroller.setAttribute('aria-label', `${noun.Many} from oldest to newest. Use the arrow keys to move along.`);
         const track = el('div', 'journey-track');
         let lastYear = '';
         ordered.forEach((postData, index) => {
@@ -522,7 +546,7 @@
         edgeLeft.innerHTML = `<span>${ICONS.left}</span>`;
         const edgeRight = el('div', 'journey-edge journey-edge-right');
         edgeRight.innerHTML = `<span>${ICONS.right}</span>`;
-        const hint = el('p', 'journey-hint muted', 'Rest the mouse near the left or right side to travel through time · click a memory to open it');
+        const hint = el('p', 'journey-hint muted', `Rest the mouse near the left or right side to travel through time · click a ${noun.one} to open it`);
         wrap.append(hint, scroller, edgeLeft, edgeRight);
 
         const updateEdges = () => {
@@ -685,14 +709,14 @@
         const panel = el('article', 'journey-focus-panel');
         panel.setAttribute('role', 'dialog');
         panel.setAttribute('aria-modal', 'true');
-        panel.setAttribute('aria-label', single ? `Memory from ${longDate(first.date)}` : `${list.length} memories from ${longDate(first.date)}`);
+        panel.setAttribute('aria-label', single ? `${noun.One} from ${longDate(first.date)}` : `${list.length} ${noun.many} from ${longDate(first.date)}`);
         const head = el('header', 'journey-focus-head');
         const titles = el('div', 'journey-focus-titles');
         titles.append(
             el('strong', '', `${weekday(first.date)}, ${longDate(first.date)}`),
             el('span', 'muted', single
                 ? `${mediaCount(first.photos)}${first.edited ? ' · Edited' : ''}`
-                : `${list.length} memories · ${mediaCount(list.flatMap((p) => p.photos))}`)
+                : `${list.length} ${noun.many} · ${mediaCount(list.flatMap((p) => p.photos))}`)
         );
         const actions = el('div', 'journey-focus-actions');
         const close = el('button', 'dialog-close');
@@ -713,7 +737,7 @@
                 const section = el('section', 'journey-focus-post');
                 const sectionHead = el('div', 'journey-focus-post-head');
                 const label = el('div', 'journey-focus-post-label');
-                label.append(el('strong', '', `Memory ${index + 1} of ${list.length}`), el('span', 'muted', `${mediaCount(postData.photos)}${postData.edited ? ' · Edited' : ''}`));
+                label.append(el('strong', '', `${noun.One} ${index + 1} of ${list.length}`), el('span', 'muted', `${mediaCount(postData.photos)}${postData.edited ? ' · Edited' : ''}`));
                 sectionHead.append(label, editButton(postData));
                 section.append(sectionHead);
                 if (postData.caption) section.append(el('p', 'journey-focus-caption', postData.caption));
@@ -795,17 +819,17 @@
         });
         const list = filtered();
         if (!posts.length) {
-            viewHost.replaceChildren(emptyState('No memories yet'));
+            viewHost.replaceChildren(emptyState(`No ${noun.many} yet`));
             return;
         }
         if (view === 'horizontal') {
-            viewHost.replaceChildren(list.length ? renderJourney(list) : emptyState(`No memories in ${year}`));
+            viewHost.replaceChildren(list.length ? renderJourney(list) : emptyState(`No ${noun.many} in ${year}`));
         } else if (view === 'gallery') {
-            viewHost.replaceChildren(list.length ? renderGallery(list) : emptyState(`No memories in ${year}`));
+            viewHost.replaceChildren(list.length ? renderGallery(list) : emptyState(`No ${noun.many} in ${year}`));
         } else if (view === 'calendar') {
             viewHost.replaceChildren(renderCalendar(list));
         } else {
-            viewHost.replaceChildren(list.length ? renderTimeline(list) : emptyState(`No memories in ${year}`));
+            viewHost.replaceChildren(list.length ? renderTimeline(list) : emptyState(`No ${noun.many} in ${year}`));
         }
         // Posts and gallery months rise in as they scroll into view.
         window.revealOnScroll?.(viewHost.querySelectorAll('.memory-card, .gallery-month'));
@@ -851,7 +875,7 @@
                 lightImage.src = next;
             }
         }
-        lightImage.alt = item.post.caption ? item.post.caption.slice(0, 120) : `Memory from ${longDate(item.post.date)}`;
+        lightImage.alt = item.post.caption ? item.post.caption.slice(0, 120) : `${noun.One} from ${longDate(item.post.date)}`;
         lightbox.querySelector('[data-lightbox-date]').textContent = `${weekday(item.post.date)}, ${longDate(item.post.date)}`;
         lightbox.querySelector('[data-lightbox-count]').textContent = lightItems.length > 1 ? `${lightIndex + 1} of ${lightItems.length}` : '';
         const caption = lightbox.querySelector('[data-lightbox-caption]');
@@ -924,7 +948,7 @@
     // ---------- delete ----------
     function deletePost(postData) {
         const dialog = document.querySelector('#confirm-dialog');
-        dialog.querySelector('[data-confirm-title]').textContent = 'Delete this memory?';
+        dialog.querySelector('[data-confirm-title]').textContent = `Delete this ${noun.one}?`;
         dialog.querySelector('[data-confirm-message]').textContent = `The post from ${longDate(postData.date)} and its ${mediaCount(postData.photos).toLowerCase().replace(' · ', ' and ')} will be removed. This cannot be undone.`;
         const ok = dialog.querySelector('[data-confirm-ok]');
         ok.textContent = 'Delete';
@@ -933,7 +957,7 @@
         const onOk = async () => {
             try {
                 await post('memory_delete', { post_id: postData.id });
-                showToast('Memory Deleted', `The post from ${longDate(postData.date)} was removed.`);
+                showToast(`${noun.One} Deleted`, `The post from ${longDate(postData.date)} was removed.`);
                 await reload();
             } catch (error) {
                 showToast('Could Not Delete', error.message, 'error');
@@ -1010,10 +1034,7 @@
         composerItems = postData ? postData.photos.map((photo) => ({ kind: 'existing', id: photo.id, video: Boolean(photo.video), duration: photo.duration })) : [];
         form.caption.value = postData ? postData.caption : '';
         setDate(postData ? postData.date : '');
-        composer.querySelector('[data-composer-title]').textContent = postData ? 'Edit memory' : 'New memory';
-        composer.querySelector('[data-composer-hint]').textContent = postData
-            ? 'Change the caption or date, remove photos or videos, or add more.'
-            : 'Add photos or videos, a caption and the date of the activity.';
+        composer.querySelector('[data-composer-title]').textContent = postData ? `Edit ${noun.one}` : `New ${noun.one}`;
         submit.textContent = postData ? 'Save changes' : 'Post';
         status.textContent = '';
         status.classList.remove('is-error');
@@ -1277,7 +1298,7 @@
                 submit.textContent = 'Retry';
             } else {
                 composer.close();
-                showToast(wasEditing ? 'Memory Saved' : 'Memory Posted', fields.taken_on ? longDate(fields.taken_on) : `Dated today, ${longDate(today)}.`);
+                showToast(wasEditing ? `${noun.One} Saved` : `${noun.One} Posted`, fields.taken_on ? longDate(fields.taken_on) : `Dated today, ${longDate(today)}.`);
             }
         } catch (error) {
             status.textContent = error.message;
