@@ -1,0 +1,14 @@
+{
+  "regions": ["sin1"],
+  "functions": {
+    "api/index.php": {
+      "runtime": "vercel-php@0.7.4",
+      "includeFiles": "{*.php,templates/**}",
+      "maxDuration": 60
+    }
+  },
+  "routes": [
+    { "src": "/(app\\.js|datepicker\\.js|memories\\.js|player\\.js|suguan\\.js|style\\.css)", "dest": "/$1" },
+    { "src": "/(.*)", "dest": "/api/index.php" }
+  ]
+}

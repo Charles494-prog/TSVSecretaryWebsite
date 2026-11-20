@@ -2,11 +2,6 @@
 declare(strict_types=1);
 
 date_default_timezone_set('Asia/Manila');
-// Photos, videos and the connection check need no session. Skipping it matters: PHP locks a session for the
-// whole request, so with one, a page of thumbnails would load one at a time instead of all together.
-if (!in_array($_GET['action'] ?? '', ['ping', 'memory_photo', 'memory_video'], true)) {
-    session_start();
-}
 require __DIR__ . '/db.php';
 if (($_GET['action'] ?? '') === 'ping') {
     $connected = false;
@@ -29,6 +24,8 @@ if ($pdo === null) {
     require __DIR__ . '/offline.php';
     exit;
 }
+require __DIR__ . '/auth.php';
+sendSecurityHeaders();
 require __DIR__ . '/docx.php';
 require __DIR__ . '/docx_templates.php';
 require __DIR__ . '/suguan.php';
@@ -39,13 +36,22 @@ require __DIR__ . '/memories.php';
 // Brings an older database up to date so no migration file has to be run by hand. The checks run once;
 // afterwards a stored schema version skips them (one quick query instead of several on every request).
 // Raise SCHEMA_VERSION whenever the upgrade steps below change, so every database runs them once more.
-const SCHEMA_VERSION = '3';
+const SCHEMA_VERSION = '4';
 try {
     $schemaVersion = $pdo->query("SELECT setting_value FROM app_settings WHERE setting_key = 'schema_version'")->fetchColumn();
 } catch (PDOException) {
     $schemaVersion = false;
 }
-if ($schemaVersion !== SCHEMA_VERSION) try {
+if ($schemaVersion !== SCHEMA_VERSION && $usingTurso) try {
+    // Turso (SQLite): the tables are made in their final form, so there is nothing to upgrade.
+    $pdo->ensureSchema();
+    authEnsureTables($pdo, true);
+    ensureSuperadmin($pdo);
+    $pdo->prepare("INSERT INTO app_settings (setting_key, setting_value) VALUES ('schema_version', :version)
+                   ON DUPLICATE KEY UPDATE setting_value = VALUES(setting_value)")->execute(['version' => SCHEMA_VERSION]);
+} catch (PDOException $e) {
+    error_log('Schema setup failed: ' . $e->getMessage());
+} elseif ($schemaVersion !== SCHEMA_VERSION) try {
     if (!$pdo->query("SHOW COLUMNS FROM officers LIKE 'wedding_anniversary'")->fetch()) {
         $pdo->exec('ALTER TABLE officers ADD COLUMN wedding_anniversary DATE DEFAULT NULL AFTER birthday');
     }
@@ -54,14 +60,27 @@ if ($schemaVersion !== SCHEMA_VERSION) try {
         $pdo->exec("ALTER TABLE app_settings MODIFY setting_value VARCHAR(5000) NOT NULL DEFAULT ''");
     }
     ensureMemoryTables($pdo);
+    authEnsureTables($pdo, false);
+    ensureSuperadmin($pdo);
     $pdo->prepare("INSERT INTO app_settings (setting_key, setting_value) VALUES ('schema_version', :version)
                    ON DUPLICATE KEY UPDATE setting_value = VALUES(setting_value)")->execute(['version' => SCHEMA_VERSION]);
 } catch (PDOException $e) {
     error_log('Schema upgrade failed: ' . $e->getMessage());
 }
 
+startSecureSession($pdo);
 if (empty($_SESSION['csrf_token'])) {
     $_SESSION['csrf_token'] = bin2hex(random_bytes(32));
+}
+// Everything below needs a signed-in account (email + password + emailed code).
+$currentUser = requireSignIn($pdo);
+$isSuperadmin = $currentUser['role'] === 'superadmin';
+if (($_GET['action'] ?? '') === 'accounts') {
+    if (!$isSuperadmin) {
+        header('Location: index.php');
+        exit;
+    }
+    accountsPage($pdo, $currentUser);
 }
 
 function h(?string $value): string
@@ -210,8 +229,13 @@ function flash(string $title, string $message = '', string $type = 'success'): v
 // Blg. numbers are automatic: 1, 2, 3... in the current order, with no gaps.
 function renumberOfficers(PDO $pdo): void
 {
-    $pdo->exec('SET @n := 0');
-    $pdo->exec('UPDATE officers SET masterlist_number = (@n := @n + 1) ORDER BY masterlist_number IS NULL, masterlist_number, id');
+    // Works on MySQL and SQLite alike: clear the numbers, then hand them out again in order.
+    $ids = $pdo->query('SELECT id FROM officers ORDER BY masterlist_number IS NULL, masterlist_number, id')->fetchAll(PDO::FETCH_COLUMN);
+    $pdo->exec('UPDATE officers SET masterlist_number = NULL');
+    $update = $pdo->prepare('UPDATE officers SET masterlist_number = :n WHERE id = :id');
+    foreach ($ids as $index => $id) {
+        $update->execute(['n' => $index + 1, 'id' => (int) $id]);
+    }
 }
 
 function sendDownload(string $filename, string $contents, string $contentType): never
@@ -1400,10 +1424,17 @@ $isEditing = !empty($formValues['id']);
             <?php endif; ?>
             <a class="side-link <?= $action === 'memories' ? 'is-active' : '' ?>" href="index.php?action=memories"><?= icon('image') ?><span>TSV Memories</span></a>
             <a class="side-link <?= $action === 'settings' ? 'is-active' : '' ?>" href="index.php?action=settings"><?= icon('pen') ?><span>Signatories</span></a>
+            <?php if ($isSuperadmin): ?>
+                <a class="side-link" href="index.php?action=accounts"><?= icon('user-plus') ?><span>Accounts</span></a>
+            <?php endif; ?>
+            <form method="post" action="index.php?action=logout" class="side-signout">
+                <input type="hidden" name="csrf_token" value="<?= h($_SESSION['csrf_token']) ?>">
+                <button class="side-link" type="submit" title="Signed in as <?= h($currentUser['email']) ?>"><?= icon('x') ?><span>Sign out</span></button>
+            </form>
         </nav>
         <div class="side-footer">
             <span class="team-avatar team-avatar-small" aria-hidden="true"></span>
-            <span data-db-label>Local MySQL</span>
+            <span data-db-label data-online="<?= $usingTurso ? 'Online database' : 'Local MySQL' ?>"><?= $usingTurso ? 'Online database' : 'Local MySQL' ?></span>
             <span class="side-footer-dot" data-db-dot title="Connected"></span>
         </div>
     </aside>

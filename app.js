@@ -151,7 +151,7 @@ async function checkConnection() {
         state = 'server';
     }
     if (dbLabel && dbDot) {
-        dbLabel.textContent = { online: 'Local MySQL', database: 'No connection', server: 'Server offline' }[state];
+        dbLabel.textContent = { online: dbLabel.dataset.online || 'Local MySQL', database: 'No connection', server: 'Server offline' }[state];
         dbDot.classList.toggle('is-offline', state !== 'online');
         dbDot.title = {
             online: 'Connected',
