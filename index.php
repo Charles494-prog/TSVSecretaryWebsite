@@ -147,6 +147,7 @@ $printForms = [
         'tsv_checklist' => 'TSV Checklist sa Pagtupad',
         'resumen_form6' => 'Resumen of TSV Form 6',
         'hymnfiles_deleted' => 'Patunay na nadelete ang hymnfiles',
+        'forms_resumen' => 'Forms Resumen (Checklist ng mga Ipapasa sa Distrito)',
     ],
     'monthly' => [
         'monthly_attendance' => 'TSV Officers Monthly Pulong Attendance',
@@ -162,6 +163,7 @@ $availablePrintFormKeys = [
     'tsv_checklist',
     'resumen_form6',
     'hymnfiles_deleted',
+    'forms_resumen',
     'monthly_attendance',
     'tsv_form3',
     'directory_report',
@@ -172,6 +174,7 @@ $templateFiles = [
     'monthly_attendance' => __DIR__ . '/templates/TSV OFFICERS MONTHLY MEETING ATTENDANCE (Template).docx',
     'resumen_form6' => __DIR__ . '/templates/TSV Form 6 Resumen (Revised).docx',
     'hymnfiles_deleted' => __DIR__ . '/templates/PATOTOO NA NADELETE NA ANG FILE.docx',
+    'forms_resumen' => __DIR__ . '/templates/CHECKLIST NG MGA IPAPASA SA DISTRITO.docx',
     'salaysay' => __DIR__ . '/templates/salaysay ng hindi tatlo ang nakasugo.docx',
     'tsv_form3' => __DIR__ . '/templates/TSV Form 3_November 2025_FYM AVENUE.xlsx',
     'directory_report' => __DIR__ . '/templates/MKN_FYM AVENUE Directory Report  November.docx',
@@ -553,6 +556,12 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $firstPrayer = is_string($rawFirstPrayer) ? trim($rawFirstPrayer) : '';
         $lastPrayer = is_string($rawLastPrayer) ? trim($rawLastPrayer) : '';
         $lecture = is_string($rawLecture) ? trim($rawLecture) : '';
+        // Karagdagang forms for the Forms Resumen: one per line.
+        $rawExtraForms = $_POST['extra_forms'] ?? '';
+        $extraForms = array_values(array_filter(
+            array_map('trim', preg_split('/\R/', is_string($rawExtraForms) ? $rawExtraForms : '')),
+            static fn(string $line): bool => $line !== ''
+        ));
         $rawAgendaTopics = $_POST['agenda_topics'] ?? '';
         $agendaTopics = parseAgendaTopics(is_string($rawAgendaTopics) ? $rawAgendaTopics : '');
         // Recruit rows: a name plus an optional birthday and wedding date (neither later than today).
@@ -665,6 +674,15 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             }
         }
 
+        if (in_array('forms_resumen', $selectedForms, true)) {
+            foreach ($extraForms as $extraForm) {
+                if (mb_strlen($extraForm) > 200) {
+                    $errors[] = 'Each karagdagang form must be 200 characters or fewer.';
+                    break;
+                }
+            }
+        }
+
         if (!$errors) {
             try {
                 savePrintSelections($pdo, $availablePrintFormKeys, $selectedForms);
@@ -679,6 +697,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     'weekly_meeting_venue' => $meetingVenue,
                 ], static fn(string $value): bool => $value !== '');
                 // The recruit list is remembered for the next monthly attendance until it is changed.
+                if (in_array('forms_resumen', $selectedForms, true)) {
+                    $meetingSettings['forms_resumen_extra'] = implode("\n", $extraForms);
+                }
                 if (in_array('monthly_attendance', $selectedForms, true)) {
                     $meetingSettings['monthly_recruits'] = json_encode($recruits, JSON_UNESCAPED_UNICODE);
                 }
@@ -802,6 +823,38 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                         $signatories,
                         $monthlyDate,
                         $templateFiles['monthly_attendance']
+                    );
+                }
+                if (in_array('forms_resumen', $selectedForms, true)) {
+                    // Everything passed to the Distrito, except the Suguan and the TSV Checklist sa Pagtupad.
+                    $resumenItems = [];
+                    foreach ([
+                        'resumen_form6' => 'Resumen ng TSV Form 6',
+                        'meeting_agenda' => 'Agenda sa Weekly Pulong ng mga TSV Officers',
+                        'weekly_attendance' => 'Attendance sa Weekly Pulong ng mga TSV Officers',
+                        'hymnfiles_deleted' => 'Patotoo na deleted na ang mga hymn files',
+                        'pagpapalaganp' => 'Weekly Monitoring sa Pagpapalaganap',
+                        'monthly_attendance' => 'Attendance sa Monthly Pulong ng mga TSV Officers',
+                        'tsv_form3' => 'TSV Form 3',
+                        'directory_report' => 'Directory Report',
+                    ] as $formKey => $formLabel) {
+                        if (in_array($formKey, $selectedForms, true)) {
+                            $resumenItems[] = $formLabel;
+                        }
+                    }
+                    foreach (array_keys($generatedDocuments) as $filename) {
+                        if (str_starts_with($filename, 'salaysay-')) {
+                            array_splice($resumenItems, 1, 0, ['Salaysay ng hindi tatlo ang nakasugo']);
+                            break;
+                        }
+                    }
+                    $today = new DateTimeImmutable('today', new DateTimeZone('Asia/Manila'));
+                    $generatedDocuments['forms-resumen-' . $today->format('Y-m-d') . '.docx'] = generateFormsResumenDocx(
+                        $resumenItems,
+                        $extraForms,
+                        $signatories,
+                        $today,
+                        $templateFiles['forms_resumen']
                     );
                 }
                 if (count($generatedDocuments) === 1) {
@@ -1228,6 +1281,7 @@ $agendaValues = [
     'webex_reason' => '',
 ];
 $savedRecruits = '[]';
+$savedExtraForms = '';
 $printSelections = [];
 foreach ($printForms as $frequency => $forms) {
     foreach (array_keys($forms) as $formKey) {
@@ -1240,6 +1294,8 @@ foreach ($settingsStatement->fetchAll() as $setting) {
         $signatories[$setting['setting_key']] = $setting['setting_value'];
     } elseif ($setting['setting_key'] === 'weekly_meeting_datetime') {
         $weeklyMeeting['datetime'] = $setting['setting_value'];
+    } elseif ($setting['setting_key'] === 'forms_resumen_extra') {
+        $savedExtraForms = $setting['setting_value'];
     } elseif ($setting['setting_key'] === 'monthly_recruits') {
         $savedRecruits = $setting['setting_value'];
     } elseif ($setting['setting_key'] === 'weekly_meeting_venue') {
@@ -1258,6 +1314,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['action'] ?? '') === 'gener
     $meetingVenueValue = $_POST['meeting_venue'] ?? '';
     $weeklyMeeting['datetime'] = is_string($meetingDateTimeValue) ? trim($meetingDateTimeValue) : '';
     $weeklyMeeting['venue'] = is_string($meetingVenueValue) ? trim($meetingVenueValue) : '';
+    $savedExtraForms = is_string($_POST['extra_forms'] ?? null) ? trim($_POST['extra_forms']) : '';
     foreach ($agendaValues as $key => $_) {
         $postedValue = $_POST[$key === 'topics' ? 'agenda_topics' : $key] ?? '';
         $agendaValues[$key] = is_string($postedValue) ? trim($postedValue) : '';
@@ -1942,6 +1999,13 @@ $isEditing = !empty($formValues['id']);
                                         <textarea name="agenda_topics" rows="8" maxlength="6000" placeholder="Paghahanda sa Pagsamba ng Linggo&#10;Pagtiyak na naka-charge ang mga camera&#10;Pagsusuri ng internet connection&#10;&#10;Recruitment ng bagong maytungkulin&#10;Pagpili ng mga kandidato"><?= h($agendaValues['topics']) ?></textarea>
                                     </label>
                                 </div>
+                            </fieldset>
+                            <fieldset class="generator-group agenda-fields" data-forms-resumen-fields data-shown-for="forms_resumen" hidden>
+                                <legend>Forms Resumen</legend>
+                                <label class="field field-wide">
+                                    <span>Karagdagang forms? (optional, one per line)</span>
+                                    <textarea name="extra_forms" rows="4" maxlength="3000" placeholder="Initial report: HVO Training with picture attachment"><?= h($savedExtraForms) ?></textarea>
+                                </label>
                             </fieldset>
                             <fieldset class="generator-group agenda-fields" data-monthly-fields hidden>
                                 <legend>Monthly reports</legend>

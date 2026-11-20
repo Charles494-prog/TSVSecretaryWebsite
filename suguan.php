@@ -792,6 +792,70 @@ function generateHymnfilesDeletedDocx(array $settings, DateTimeImmutable $today,
     );
 }
 
+// Fills a list table (header row first): the lines go down the middle column, rows are added as needed,
+// and the remaining template rows are left blank for handwriting.
+function fillDocxListTable(DOMXPath $xpath, DOMElement $table, array $items, ?DOMElement $styleSource): void
+{
+    $rows = array_slice(docxRows($xpath, $table), 1);
+    while (count($rows) < count($items)) {
+        $copy = end($rows)->cloneNode(true);
+        $table->appendChild($copy);
+        $rows[] = $copy;
+    }
+    foreach ($rows as $index => $row) {
+        $cell = docxCell($xpath, $row, 1);
+        // The text goes into a clean run so the template's sample formatting is not kept.
+        foreach (iterator_to_array($xpath->query('.//w:r', $cell)) as $run) {
+            $run->parentNode->removeChild($run);
+        }
+        if (isset($items[$index])) {
+            setDocxCellText($xpath, $cell, (string) $items[$index], $styleSource);
+        }
+    }
+}
+
+// The weekly Checklist ng mga Ipapasa sa Distrito: every form being passed, plus the karagdagang forms.
+function generateFormsResumenDocx(array $items, array $extra, array $settings, DateTimeImmutable $today, string $templatePath): string
+{
+    return generateDocxFromTemplate(
+        $templatePath,
+        static function (DOMXPath $xpath) use ($items, $extra, $settings, $today): void {
+            $header = docxRows($xpath, docxTableAt($xpath, 0))[0];
+            setDocxCellText($xpath, docxCell($xpath, $header, 1), (string) ($settings['locale_name'] ?? ''), docxCell($xpath, $header, 0));
+            setWordText($xpath, docxCell($xpath, $header, 3), $today->format('m/d/Y'));
+
+            $list = docxTableAt($xpath, 1);
+            $more = docxTableAt($xpath, 2);
+            // Both lists use the plain look of the first ULATAN line (the template's karagdagan example is red).
+            $style = docxCell($xpath, docxRows($xpath, $list)[1], 1)->cloneNode(true);
+            fillDocxListTable($xpath, $list, $items, $style);
+            fillDocxListTable($xpath, $more, $extra, $style);
+
+            $signatures = docxRows($xpath, docxTableAt($xpath, 3))[0];
+            foreach (['tsv_secretary' => 0, 'tsv_lead' => 1, 'pastor' => 2] as $key => $column) {
+                $name = (string) ($settings[$key] ?? '');
+                if ($name === '') {
+                    continue;
+                }
+                $cell = docxCell($xpath, $signatures, $column);
+                $paragraphs = $xpath->query('./w:p', $cell);
+                $role = $paragraphs->item($paragraphs->length - 1);
+                $nameParagraph = $role->cloneNode(true);
+                setWordText($xpath, $nameParagraph, $name);
+                foreach ($xpath->query('.//w:r', $nameParagraph) as $run) {
+                    $properties = $xpath->query('./w:rPr', $run)->item(0);
+                    if (!$properties) {
+                        $properties = $run->ownerDocument->createElementNS(WORD_NAMESPACE, 'w:rPr');
+                        $run->insertBefore($properties, $run->firstChild);
+                    }
+                    $properties->insertBefore($run->ownerDocument->createElementNS(WORD_NAMESPACE, 'w:b'), $properties->firstChild);
+                }
+                $cell->insertBefore($nameParagraph, $role);
+            }
+        }
+    );
+}
+
 function suguanWeekPayload(PDO $pdo, DateTimeImmutable $monday): array
 {
     $week = loadSuguanWeek($pdo, $monday);
