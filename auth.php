@@ -381,7 +381,7 @@ function requireSignIn(PDO $pdo): array
         return $user;
     }
     // Not signed in: background requests get a plain "401", pages get the sign-in form.
-    if (in_array($_GET['action'] ?? '', ['ping', 'memory_photo', 'memory_video', 'suguan_data', 'memories_data'], true)
+    if (in_array($_GET['action'] ?? '', ['ping', 'suguan_data'], true)
         || str_contains(strtolower($_SERVER['HTTP_ACCEPT'] ?? ''), 'application/json')) {
         session_abort();
         http_response_code(401);

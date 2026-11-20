@@ -10,7 +10,6 @@ $todayYmd = $today->format('Y-m-d');
 $localeBadge = $signatories['locale_name'] !== '' ? $signatories['locale_name'] : 'Locale';
 $active = static fn(string $a): string => $action === $a ? 'is-active' : '';
 $sel = static fn(bool $cond): string => $cond ? 'selected' : '';
-$memoryCategory = memoryCategory($_GET['category'] ?? null);
 ?>
 <!doctype html>
 <html lang="en">
@@ -48,7 +47,6 @@ $memoryCategory = memoryCategory($_GET['category'] ?? null);
                 <a class="side-link desktop-nav" href="index.php#generator"><?= icon('printer') ?><span>Form generator</span></a>
             <?php endif; ?>
             <a class="side-link mobile-nav <?= $active('generator') ?>" href="index.php?action=generator"><?= icon('printer') ?><span>Form generator</span></a>
-            <a class="side-link <?= $active('memories') ?>" href="index.php?action=memories"><?= icon('image') ?><span>TSV Memories</span></a>
             <a class="side-link <?= $active('settings') ?>" href="index.php?action=settings"><?= icon('pen') ?><span>Signatories</span></a>
             <?php if ($isSuperadmin): ?>
                 <a class="side-link <?= $active('accounts') ?>" href="index.php?action=accounts"><?= icon('users') ?><span>Accounts</span></a>
@@ -69,8 +67,6 @@ $memoryCategory = memoryCategory($_GET['category'] ?? null);
                     <span class="crumb-sep">/</span><span>Generate forms</span>
                 <?php elseif ($action === 'accounts'): ?>
                     <span class="crumb-sep">/</span><span>Accounts</span>
-                <?php elseif ($action === 'memories'): ?>
-                    <span class="crumb-sep">/</span><span><?= $memoryCategory === 'activities' ? 'Formal Activities' : 'TSV Memories' ?></span>
                 <?php endif; ?>
             </div>
             <div class="topbar-actions">
@@ -102,8 +98,6 @@ if ($action === 'settings') {
     echo accountsBody($pdo, $currentUser, $accountMessage ?? null);
 } elseif ($action === 'import_review' && is_array($_SESSION['import_preview'] ?? null)) {
     viewImportReview($csrfInput, $_SESSION['import_preview'], $officerTotals['total']);
-} elseif ($action === 'memories') {
-    viewMemories($pdo, $memoryCategory, $todayYmd, $jsonFlags);
 } elseif ($action === 'form') {
     viewOfficerForm($csrfInput, $formValues, $isEditing, $allowedRoles, $todayYmd);
 } elseif ($action === 'generator') {
@@ -131,9 +125,8 @@ if ($action === 'settings') {
 <script type="application/json" id="toast-data"><?= json_encode($toast, $jsonFlags) ?></script>
 <?php endif; ?>
 <script src="datepicker.js?v=3"></script>
-<script src="app.js?v=31"></script>
+<script src="app.js?v=32"></script>
 <?php if ($action === 'list' || $action === 'generator'): ?><script src="suguan.js?v=31"></script><?php endif; ?>
-<?php if ($action === 'memories'): ?><script src="player.js?v=3"></script><script src="memories.js?v=31"></script><?php endif; ?>
 </body>
 </html>
 <?php
@@ -187,25 +180,12 @@ function viewImportReview(string $csrfInput, array $p, int $total): void
     if ($p['skipped']) {
         $summary .= ' · ' . count($p['skipped']) . ' skipped';
     }
-    $posts = (int) ($p['memory_posts'] ?? 0);
-    if ($posts > 0) {
-        $summary .= " · {$posts} memories with " . (int) $p['memory_photos'] . ' photos';
-        if (!empty($p['memory_videos'])) {
-            $summary .= ' and ' . (int) $p['memory_videos'] . ' videos';
-        }
-    }
-    $memoryNote = '';
-    if ($posts > 0) {
-        $memoryNote = $replace
-            ? " All current TSV Memories will also be replaced with the {$posts} memories in the file."
-            : " The {$posts} memories in the file will be added to TSV Memories; photos and videos that are already there are skipped.";
-    }
     if ($n === 0) {
-        $message = "This file has no officer records, so the officers are left unchanged.{$memoryNote}";
+        $message = "This file has no officer records, so the officers are left unchanged.";
     } elseif ($replace) {
-        $message = "This will permanently delete all {$total} current officer records and replace them with the {$n} records below. Export an SQL backup first if you might need the current records.{$memoryNote}";
+        $message = "This will permanently delete all {$total} current officer records and replace them with the {$n} records below. Export an SQL backup first if you might need the current records.";
     } else {
-        $message = "This will add the {$n} records below to the {$total} existing officer records. Blg. numbers that are already in use will be left blank.{$memoryNote}";
+        $message = "This will add the {$n} records below to the {$total} existing officer records. Blg. numbers that are already in use will be left blank.";
     }
     $confirm = $replace
         ? "All {$total} current officer records will be deleted and replaced with {$n} records from the file. This cannot be undone."
@@ -258,103 +238,6 @@ function viewImportReview(string $csrfInput, array $p, int $total): void
     <?php
 }
 
-function viewMemories(PDO $pdo, string $category, string $today, int $jsonFlags): void
-{
-    $activities = $category === 'activities';
-    $title = $activities ? 'Formal Activities' : 'TSV Memories';
-    $noun = $activities ? 'activity' : 'memory';
-    $data = [
-        'category' => $category,
-        'posts' => memoriesPayload($pdo, $category),
-        'csrf' => $_SESSION['csrf_token'],
-        'today' => $today,
-        'videoMaxBytes' => MEMORY_VIDEO_MAX_BYTES,
-    ];
-    ?>
-<div class="page-title page-title-row">
-    <div>
-        <div class="segmented collection-toggle" role="tablist" aria-label="Collection"><a role="tab" href="index.php?action=memories" class="<?= $activities ? '' : 'is-active' ?>" aria-selected="<?= $activities ? 'false' : 'true' ?>">TSV Memories</a><a role="tab" href="index.php?action=memories&amp;category=activities" class="<?= $activities ? 'is-active' : '' ?>" aria-selected="<?= $activities ? 'true' : 'false' ?>">Formal Activities</a></div>
-        <h1><?= $title ?></h1>
-    </div>
-    <div class="page-title-actions">
-        <button class="button" type="button" data-memory-new><?= icon('plus') ?>New <?= $noun ?></button>
-    </div>
-</div>
-<div class="memories" data-memories>
-    <div class="memories-toolbar">
-        <div class="segmented" role="tablist" aria-label="View">
-            <button type="button" role="tab" data-view="timeline">Timeline</button>
-            <button type="button" role="tab" data-view="horizontal">Horizontal</button>
-            <button type="button" role="tab" data-view="gallery">Gallery</button>
-            <button type="button" role="tab" data-view="calendar">Calendar</button>
-        </div>
-        <label class="pill">
-            <span class="pill-label">Year</span>
-            <select data-year-filter aria-label="Filter by year"><option value="">All years</option></select>
-        </label>
-    </div>
-    <section class="memories-onthisday" data-on-this-day hidden></section>
-    <div data-memories-view></div>
-</div>
-<dialog class="generator-dialog memory-composer" id="memory-composer" aria-labelledby="memory-composer-title">
-    <form class="generator-form" data-memory-form novalidate>
-        <div class="generator-heading">
-            <div>
-                <h2 id="memory-composer-title" data-composer-title>New <?= $noun ?></h2>
-                <p class="muted" data-composer-hint hidden></p>
-            </div>
-            <button class="dialog-close" type="button" data-composer-close aria-label="Close"><?= icon('x') ?></button>
-        </div>
-        <div class="generator-body composer-body">
-            <label class="field">
-                <span>Caption</span>
-                <textarea name="caption" rows="3" maxlength="2000" placeholder="What happened? e.g. Paglilinis ng kapilya kasama ang mga TSV officers"></textarea>
-            </label>
-            <label class="field">
-                <span>Date of the activity (optional — leave blank to use today)</span>
-                <input name="taken_on" type="date" max="<?= $today ?>">
-            </label>
-            <div class="field">
-                <span>Photos and videos</span>
-                <div class="composer-photos" data-composer-photos></div>
-                <label class="dropzone composer-drop" data-composer-drop>
-                    <input class="dropzone-input" type="file" accept="image/*,video/*" multiple data-composer-files>
-                    <span class="dropzone-icon"><?= icon('image') ?></span>
-                    <strong><span class="only-desktop">Drag &amp; drop photos or videos here</span><span class="only-phone">Tap to choose photos or videos</span></strong>
-                    <span class="muted"><span class="only-desktop">or click to choose · </span>photos are resized · videos up to <?= intdiv(MEMORY_VIDEO_MAX_BYTES, 1024 * 1024) ?> MB (MP4, WebM or MOV)</span>
-                </label>
-            </div>
-            <p class="composer-status" data-composer-status role="status"></p>
-        </div>
-        <div class="panel-footer">
-            <span class="muted composer-count" data-composer-count></span>
-            <div class="form-actions">
-                <button class="button button-light" type="button" data-composer-close>Cancel</button>
-                <button class="button" type="submit" data-composer-submit>Post</button>
-            </div>
-        </div>
-    </form>
-</dialog>
-<div class="lightbox" data-lightbox hidden>
-    <button class="lightbox-close" type="button" data-lightbox-close aria-label="Close"><?= icon('x') ?></button>
-    <button class="lightbox-nav lightbox-prev" type="button" data-lightbox-step="-1" aria-label="Previous photo"><?= icon('chevron-left') ?></button>
-    <figure class="lightbox-figure">
-        <img data-lightbox-image alt="">
-        <div class="lightbox-player" data-lightbox-player hidden></div>
-        <figcaption>
-            <div class="lightbox-meta"><strong data-lightbox-date></strong><span class="muted" data-lightbox-count></span></div>
-            <p data-lightbox-caption></p>
-            <div class="lightbox-actions">
-                <button class="button button-light" type="button" data-lightbox-edit><?= icon('pen') ?>Edit post</button>
-                <a class="button button-light" data-lightbox-download href="#"><?= icon('download') ?>Download</a>
-            </div>
-        </figcaption>
-    </figure>
-    <button class="lightbox-nav lightbox-next" type="button" data-lightbox-step="1" aria-label="Next photo"><?= icon('chevron-right') ?></button>
-</div>
-<script type="application/json" id="memories-data"><?= json_encode($data, $jsonFlags) ?></script>
-    <?php
-}
 
 function viewOfficerForm(string $csrfInput, array $v, bool $editing, array $roles, string $today): void
 {
@@ -417,7 +300,7 @@ function viewOverview(string $csrfInput, array $officers, string $search, string
     </div>
     <div class="page-title-actions">
         <button class="button button-light" type="button" data-open-import><?= icon('upload') ?>Import</button>
-        <a class="button button-light" href="index.php?action=export_sql" title="Backup of the officer records and TSV Memories photos" data-download-toast="Backup Exported" data-download-message="The officer records and memories were saved as an SQL file."><?= icon('database') ?>Export SQL</a>
+        <a class="button button-light" href="index.php?action=export_sql" title="Backup of the officer records and settings" data-download-toast="Backup Exported" data-download-message="The officer records were saved as an SQL file."><?= icon('database') ?>Export SQL</a>
         <a class="button button-light" href="index.php?action=export_xlsx" data-download-toast="Excel Exported" data-download-message="The masterlist was saved as an Excel file."><?= icon('sheet') ?>Export Excel</a>
         <form method="post" action="index.php" data-download-toast="Masterlist Generated!" data-download-message="The masterlist DOCX is downloading.">
             <input type="hidden" name="download_token" value="">

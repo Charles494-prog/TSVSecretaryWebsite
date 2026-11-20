@@ -8,7 +8,7 @@
     }
   },
   "routes": [
-    { "src": "/(logo\\.png|app\\.js|datepicker\\.js|memories\\.js|player\\.js|suguan\\.js|style\\.css)", "dest": "/$1" },
+    { "src": "/(logo\\.png|app\\.js|datepicker\\.js|suguan\\.js|style\\.css)", "dest": "/$1" },
     { "src": "/(.*)", "dest": "/api/index.php" }
   ]
 }

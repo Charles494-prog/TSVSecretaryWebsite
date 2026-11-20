@@ -32,12 +32,11 @@ require __DIR__ . '/suguan.php';
 require __DIR__ . '/monthly_reports.php';
 require __DIR__ . '/directory.php';
 require __DIR__ . '/import_export.php';
-require __DIR__ . '/memories.php';
 
 // Brings an older database up to date so no migration file has to be run by hand. The checks run once;
 // afterwards a stored schema version skips them (one quick query instead of several on every request).
 // Raise SCHEMA_VERSION whenever the upgrade steps below change, so every database runs them once more.
-const SCHEMA_VERSION = '5';
+const SCHEMA_VERSION = '6';
 try {
     $schemaVersion = $pdo->query("SELECT setting_value FROM app_settings WHERE setting_key = 'schema_version'")->fetchColumn();
 } catch (PDOException) {
@@ -46,6 +45,7 @@ try {
 if ($schemaVersion !== SCHEMA_VERSION && $usingTurso) try {
     // Turso (SQLite): the tables are made in their final form, so there is nothing to upgrade.
     $pdo->ensureSchema();
+    dropMemoryTables($pdo);
     authEnsureTables($pdo, true);
     ensureSuperadmin($pdo);
     $pdo->prepare("INSERT INTO app_settings (setting_key, setting_value) VALUES ('schema_version', :version)
@@ -60,7 +60,7 @@ if ($schemaVersion !== SCHEMA_VERSION && $usingTurso) try {
     if ($settingColumn && strtolower((string) $settingColumn['Type']) === 'varchar(150)') {
         $pdo->exec("ALTER TABLE app_settings MODIFY setting_value VARCHAR(5000) NOT NULL DEFAULT ''");
     }
-    ensureMemoryTables($pdo);
+    dropMemoryTables($pdo);
     authEnsureTables($pdo, false);
     ensureSuperadmin($pdo);
     $pdo->prepare("INSERT INTO app_settings (setting_key, setting_value) VALUES ('schema_version', :version)
@@ -155,7 +155,7 @@ if (($_GET['action'] ?? '') === 'suguan') {
     header('Location: index.php#generator');
     exit;
 }
-$allowedActions = ['list', 'form', 'settings', 'generator', 'accounts', 'suguan_data', 'export_xlsx', 'export_sql', 'import_review', 'memories', 'memories_data', 'memory_photo', 'memory_video'];
+$allowedActions = ['list', 'form', 'settings', 'generator', 'accounts', 'suguan_data', 'export_xlsx', 'export_sql', 'import_review'];
 $allowedRoles = [
     'Locale TSV Lead',
     'Locale TSV Assistant Lead',
@@ -293,18 +293,6 @@ if ($action === 'export_sql') {
     });
     exit;
 }
-if ($action === 'memory_photo') {
-    sendMemoryPhoto($pdo, (int) ($_GET['id'] ?? 0), ($_GET['size'] ?? '') === 'thumb');
-}
-if ($action === 'memory_video') {
-    sendMemoryVideo($pdo, (int) ($_GET['id'] ?? 0));
-}
-if ($action === 'memories') {
-    clearAbandonedVideos($pdo);
-}
-if ($action === 'memories_data') {
-    sendJson(['posts' => memoriesPayload($pdo, memoryCategory($_GET['category'] ?? null))]);
-}
 $errors = [];
 $expectsJson = str_contains(
     strtolower($_SERVER['HTTP_ACCEPT'] ?? ''),
@@ -356,32 +344,16 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             set_time_limit(300);
             $contents = (string) file_get_contents($upload['tmp_name']);
             [$records, $skipped] = normalizeImportedOfficers(parseOfficerSqlDump($contents), $allowedRoles);
-            $memories = parseMemorySqlDump($contents);
-            if (!$records && !$memories['posts']) {
+            if (!$records) {
                 throw new InvalidArgumentException(
-                    'No officer records or memories were found in that file.' . ($skipped ? ' ' . implode(' ', array_slice($skipped, 0, 3)) : '')
+                    'No officer records were found in that file.' . ($skipped ? ' ' . implode(' ', array_slice($skipped, 0, 3)) : '')
                 );
-            }
-            // The photos stay in a temporary copy of the file until the import is confirmed.
-            $stagedFile = null;
-            if ($memories['posts']) {
-                $stagedFile = sys_get_temp_dir() . DIRECTORY_SEPARATOR . 'tsv-import-' . bin2hex(random_bytes(8)) . '.sql';
-                if (!move_uploaded_file($upload['tmp_name'], $stagedFile)) {
-                    throw new InvalidArgumentException('Could not read the uploaded backup. Please try again.');
-                }
-            }
-            if (is_string($_SESSION['import_preview']['memory_file'] ?? null)) {
-                @unlink($_SESSION['import_preview']['memory_file']);
             }
             $_SESSION['import_preview'] = [
                 'file' => mb_substr(basename((string) $upload['name']), 0, 120),
                 'mode' => $mode,
                 'records' => $records,
                 'skipped' => $skipped,
-                'memory_file' => $stagedFile,
-                'memory_posts' => count($memories['posts']),
-                'memory_photos' => $memories['photo_count'],
-                'memory_videos' => $memories['video_count'],
             ];
             header('Location: index.php?action=import_review');
             exit;
@@ -397,25 +369,13 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             $action = 'list';
         } else {
             $replace = $preview['mode'] === 'replace';
-            $memoryFile = is_string($preview['memory_file'] ?? null) ? $preview['memory_file'] : null;
             $messages = [];
             try {
                 set_time_limit(300);
-                // Officers are only replaced when the file has officers, memories only when it has memories.
                 if ($preview['records']) {
                     $count = importOfficers($pdo, $preview['records'], $replace);
                     renumberOfficers($pdo);
                     $messages[] = $replace ? "{$count} officer records were restored." : "{$count} officer records were added.";
-                }
-                if ($memoryFile && is_file($memoryFile)) {
-                    $backup = (string) file_get_contents($memoryFile);
-                    $memories = parseMemorySqlDump($backup);
-                    $pdo->beginTransaction();
-                    $added = importMemories($pdo, $memories['posts'], $replace, $backup);
-                    $pdo->commit();
-                    unset($backup);
-                    $messages[] = "{$added['posts']} memories with {$added['photos']} photos"
-                        . ($added['videos'] ? " and {$added['videos']} videos" : '') . ' were ' . ($replace ? 'restored.' : 'added.');
                 }
                 flash('Import Complete', implode(' ', $messages));
                 header('Location: index.php');
@@ -425,99 +385,15 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     $pdo->rollBack();
                 }
                 error_log('Import failed: ' . $e->getMessage());
-                $errors[] = $messages
-                    ? implode(' ', $messages) . ' The memories could not be imported, so they were left unchanged.'
-                    : 'The import failed and no records were changed. The file may contain duplicate record IDs.';
+                $errors[] = 'The import failed and no records were changed. The file may contain duplicate record IDs.';
                 $action = 'list';
-            } finally {
-                if ($memoryFile) {
-                    @unlink($memoryFile);
-                }
             }
         }
     } elseif ($postAction === 'import_cancel') {
-        if (is_string($_SESSION['import_preview']['memory_file'] ?? null)) {
-            @unlink($_SESSION['import_preview']['memory_file']);
-        }
         unset($_SESSION['import_preview']);
         flash('Import Cancelled', 'No records were changed.', 'info');
         header('Location: index.php');
         exit;
-    } elseif (in_array($postAction, ['memory_create', 'memory_add_photo', 'memory_video_start', 'memory_video_chunk', 'memory_video_finish', 'memory_update', 'memory_delete'], true)) {
-        try {
-            $postId = (int) ($_POST['post_id'] ?? 0);
-            if ($postAction !== 'memory_create' && !memoryPostExists($pdo, $postId)) {
-                throw new InvalidArgumentException('That memory no longer exists. Reload the page.');
-            }
-            if ($postAction === 'memory_create') {
-                $statement = $pdo->prepare(
-                    'INSERT INTO memory_posts (taken_on, caption, category, created_at, updated_at) VALUES (:taken_on, :caption, :category, NOW(), NOW())'
-                );
-                $statement->execute(['taken_on' => memoryDate($_POST['taken_on'] ?? ''), 'caption' => memoryCaption($_POST['caption'] ?? ''), 'category' => memoryCategory($_POST['category'] ?? null)]);
-                sendJson(['success' => true, 'id' => (int) $pdo->lastInsertId()]);
-            }
-            if ($postAction === 'memory_add_photo') {
-                $row = memoryPhotoRow($_POST['photo'] ?? '', $_POST['thumb'] ?? '');
-                $photoId = addMemoryMedia($pdo, $postId, $row);
-                if (($_POST['edit'] ?? '') === '1') {
-                    touchMemoryPost($pdo, $postId);
-                }
-                sendJson(['success' => true, 'photo' => ['id' => $photoId, 'w' => $row['width'], 'h' => $row['height']]]);
-            }
-            // A video arrives in three steps: its details and poster frame, its 512 KB pieces, then a final check.
-            if ($postAction === 'memory_video_start') {
-                $row = memoryVideoRow($_POST['mime'] ?? '', $_POST['size'] ?? 0, $_POST['width'] ?? 0, $_POST['height'] ?? 0, $_POST['duration'] ?? 0, $_POST['poster'] ?? '');
-                sendJson(['success' => true, 'id' => addMemoryMedia($pdo, $postId, $row, false), 'chunk' => MEMORY_VIDEO_CHUNK_BYTES]);
-            }
-            if ($postAction === 'memory_video_chunk') {
-                addVideoChunk($pdo, (int) ($_POST['media_id'] ?? 0), $postId, (int) ($_POST['seq'] ?? -1), $_FILES['chunk'] ?? null);
-                sendJson(['success' => true]);
-            }
-            if ($postAction === 'memory_video_finish') {
-                $mediaId = (int) ($_POST['media_id'] ?? 0);
-                finishVideo($pdo, $mediaId, $postId);
-                if (($_POST['edit'] ?? '') === '1') {
-                    touchMemoryPost($pdo, $postId);
-                }
-                $video = $pdo->query('SELECT width, height, duration_ms FROM memory_photos WHERE id = ' . $mediaId)->fetch();
-                sendJson(['success' => true, 'photo' => [
-                    'id' => $mediaId,
-                    'w' => (int) $video['width'],
-                    'h' => (int) $video['height'],
-                    'video' => true,
-                    'duration' => round((int) $video['duration_ms'] / 1000, 1),
-                ]]);
-            }
-            if ($postAction === 'memory_update') {
-                $pdo->beginTransaction();
-                $pdo->prepare('UPDATE memory_posts SET taken_on = :taken_on, caption = :caption, updated_at = GREATEST(NOW(), created_at + INTERVAL 1 SECOND) WHERE id = :id')->execute([
-                    'taken_on' => memoryDate($_POST['taken_on'] ?? ''),
-                    'caption' => memoryCaption($_POST['caption'] ?? ''),
-                    'id' => $postId,
-                ]);
-                $removed = array_filter(array_map('intval', is_array($_POST['remove_photos'] ?? null) ? $_POST['remove_photos'] : []));
-                foreach ($removed as $photoId) {
-                    deleteMemoryMedia($pdo, $photoId, $postId);
-                }
-                $pdo->commit();
-                sendJson(['success' => true]);
-            }
-            $pdo->beginTransaction();
-            deleteMemoryPost($pdo, $postId);
-            $pdo->commit();
-            sendJson(['success' => true]);
-        } catch (InvalidArgumentException $e) {
-            if ($pdo->inTransaction()) {
-                $pdo->rollBack();
-            }
-            sendJson(['success' => false, 'message' => $e->getMessage()], 422);
-        } catch (Throwable $e) {
-            if ($pdo->inTransaction()) {
-                $pdo->rollBack();
-            }
-            error_log('TSV Memories failed: ' . $e->getMessage());
-            sendJson(['success' => false, 'message' => 'Could not save the memory. Please try again.'], 500);
-        }
     } elseif ($postAction === 'save_suguan') {
         try {
             $monday = suguanWeekStart(is_string($_POST['week'] ?? null) ? $_POST['week'] : null);

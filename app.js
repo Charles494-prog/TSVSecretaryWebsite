@@ -246,10 +246,42 @@ function useDroppedFiles(files) {
     const transfer = new DataTransfer();
     transfer.items.add(files[0]);
     importFileInput.files = transfer.files;
-    showImportFile();
+    importFileInput.dispatchEvent(new Event('change'));
 }
 
-importFileInput?.addEventListener('change', showImportFile);
+// Backups from the desktop app can carry TSV Memories photos, which the website no longer keeps.
+// They are cut out here, before upload, so the file fits the 4 MB the server accepts.
+async function dropMemoryRows(file) {
+    if (!file || file.size <= 512 * 1024 || !/\.(sql|mysql|txt)$/i.test(file.name)) {
+        return file;
+    }
+    const kept = [];
+    let skipping = false;
+    for (const line of (await file.text()).split('\n')) {
+        if (!skipping && /^\s*INSERT INTO `?memory_/i.test(line)) {
+            skipping = true;
+        }
+        if (!skipping) {
+            kept.push(line);
+        } else if (/;\s*$/.test(line)) {
+            skipping = false;
+        }
+    }
+    return new File([kept.join('\n')], file.name, { type: file.type || 'application/sql' });
+}
+
+importFileInput?.addEventListener('change', async () => {
+    const file = importFileInput.files[0];
+    if (file && !file.tsvStripped && file.size > 512 * 1024) {
+        dropzoneHint.textContent = 'Reading the backup…';
+        const slim = await dropMemoryRows(file);
+        slim.tsvStripped = true;
+        const transfer = new DataTransfer();
+        transfer.items.add(slim);
+        importFileInput.files = transfer.files;
+    }
+    showImportFile();
+});
 
 // Dropping a file anywhere on the officers page opens the import dialog with it selected.
 const draggingFiles = (event) => [...(event.dataTransfer?.types ?? [])].includes('Files');

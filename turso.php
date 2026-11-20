@@ -211,20 +211,9 @@ final class TursoPDO extends PDO
             "CREATE TABLE IF NOT EXISTS officers (id INTEGER PRIMARY KEY AUTOINCREMENT, masterlist_number INTEGER DEFAULT NULL UNIQUE, name TEXT NOT NULL, tungkulin TEXT NOT NULL, oath_taking_date TEXT DEFAULT NULL, oath_taking_text TEXT DEFAULT NULL, ndi_signing_date TEXT DEFAULT NULL, ndi_signing_text TEXT DEFAULT NULL, is_active INTEGER NOT NULL DEFAULT 1, birthday TEXT DEFAULT NULL, wedding_anniversary TEXT DEFAULT NULL, contact_telegram TEXT DEFAULT NULL)",
             "CREATE TABLE IF NOT EXISTS suguan_weeks (week_start TEXT NOT NULL PRIMARY KEY, services TEXT NOT NULL, updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)",
             "CREATE TABLE IF NOT EXISTS app_settings (setting_key TEXT NOT NULL PRIMARY KEY, setting_value TEXT NOT NULL DEFAULT '')",
-            "CREATE TABLE IF NOT EXISTS memory_posts (id INTEGER PRIMARY KEY AUTOINCREMENT, taken_on TEXT NOT NULL, caption TEXT NOT NULL DEFAULT '', category TEXT NOT NULL DEFAULT 'memories', created_at TEXT NOT NULL, updated_at TEXT NOT NULL)",
-            "CREATE INDEX IF NOT EXISTS idx_memory_posts_taken_on ON memory_posts (taken_on)",
-            "CREATE TABLE IF NOT EXISTS memory_photos (id INTEGER PRIMARY KEY AUTOINCREMENT, post_id INTEGER NOT NULL, position INTEGER NOT NULL DEFAULT 0, kind TEXT NOT NULL DEFAULT 'photo', checksum TEXT NOT NULL, mime TEXT NOT NULL, width INTEGER NOT NULL, height INTEGER NOT NULL, duration_ms INTEGER NOT NULL DEFAULT 0, size_bytes INTEGER NOT NULL DEFAULT 0, complete INTEGER NOT NULL DEFAULT 1, uploaded_at TEXT DEFAULT NULL, photo TEXT NOT NULL, thumb TEXT NOT NULL)",
-            "CREATE INDEX IF NOT EXISTS idx_memory_photos_post ON memory_photos (post_id, position)",
-            "CREATE INDEX IF NOT EXISTS idx_memory_photos_checksum ON memory_photos (checksum)",
-            "CREATE TABLE IF NOT EXISTS memory_video_chunks (media_id INTEGER NOT NULL, seq INTEGER NOT NULL, data TEXT NOT NULL, PRIMARY KEY (media_id, seq))",
             "INSERT OR IGNORE INTO app_settings (setting_key, setting_value) VALUES ('pastor', ''), ('pd_tagasubaybay', ''), ('tsv_lead', ''), ('assistant_tsv_lead', ''), ('tsv_secretary', ''), ('locale_name', 'FYM AVENUE'), ('district_name', 'MARIKINA'), ('district_supervisor', 'CYRUS JOSE E. DIZON'), ('district_tsv_overseer', ''), ('webex_display_name', 'MKN-FYM Avenue'), ('weekly_meeting_datetime', ''), ('weekly_meeting_venue', ''), ('monthly_recruits', '[]')",
         ];
         $this->pipeline(array_map(static fn(string $sql): array => ['type' => 'execute', 'stmt' => ['sql' => $sql]], $statements));
-        // Databases made before Formal Activities get the category column.
-        $columns = array_column($this->run('PRAGMA table_info(memory_posts)')[1], 1);
-        if (!in_array('category', $columns, true)) {
-            $this->run("ALTER TABLE memory_posts ADD COLUMN category TEXT NOT NULL DEFAULT 'memories'");
-        }
     }
 }
 

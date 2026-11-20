@@ -19,7 +19,15 @@ const LEGACY_OFFICER_ROLES = [
     'TSV Officers' => 'Locale TSV Officer',
     'Locale TSV Officer ng Officers' => 'Locale TSV Officer',
 ];
-// Backups now carry photos, so the limit is whatever PHP accepts (raised to 512 MB in .htaccess).
+// TSV Memories was removed from the website (Vercel cannot send or receive more than 4.5 MB at once).
+// Leftover memory tables are dropped once so their photos stop taking space.
+function dropMemoryTables(PDO $pdo): void
+{
+    foreach (['memory_video_chunks', 'memory_photos', 'memory_posts'] as $table) {
+        $pdo->exec("DROP TABLE IF EXISTS {$table}");
+    }
+}
+
 function iniBytes(string $key): int
 {
     $value = trim((string) ini_get($key));
@@ -34,7 +42,9 @@ function iniBytes(string $key): int
 
 function importMaxBytes(): int
 {
-    return min(iniBytes('upload_max_filesize'), iniBytes('post_max_size'));
+    // Vercel refuses request bodies over 4.5 MB, whatever PHP allows.
+    $limit = min(iniBytes('upload_max_filesize'), iniBytes('post_max_size'));
+    return getenv('VERCEL') ? min($limit, 4 * 1024 * 1024) : $limit;
 }
 
 function formatBytes(int $bytes): string
@@ -145,17 +155,16 @@ function officersXlsx(array $officers): string
     ]);
 }
 
-// A backup that phpMyAdmin can also import: the officer records plus the TSV Memories posts and photos.
+// A backup that phpMyAdmin can also import: the officer records, settings and Suguan weeks.
 // It is written piece by piece through $write, since the photos can make it large.
 function writeBackupSql(PDO $pdo, callable $write): void
 {
-    $write("-- TSV officer records and TSV Memories\n-- Exported " . date('Y-m-d H:i') . "\n\n" . officersSqlDump($pdo));
+    $write("-- TSV officer records\n-- Exported " . date('Y-m-d H:i') . "\n\n" . officersSqlDump($pdo));
     $write(settingsSqlDump($pdo));
-    writeMemoriesSql($pdo, $write);
 }
 
 // The signatories, locale and form-generator settings plus the planned Suguan weeks, so the TSV Secretary
-// desktop app can restore them. This site's own Import still reads only the officers and memories.
+// desktop app can restore them. This site's own Import still reads only the officers.
 function settingsSqlDump(PDO $pdo): string
 {
     $pairs = static fn(array $rows): string => implode(",\n", array_map(
