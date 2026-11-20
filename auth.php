@@ -452,7 +452,7 @@ function requireSignIn(PDO $pdo): array
                     $_SESSION['last_seen'] = time();
                     $_SESSION['csrf_token'] = bin2hex(random_bytes(32));
                     $pdo->prepare('UPDATE app_users SET last_login_at = :now WHERE id = :id')->execute(['now' => time(), 'id' => $user['id']]);
-                    header('Location: index.php');
+                    header('Location: index.php', true, 303);
                     exit;
                 }
                 $step = 'password';
@@ -645,9 +645,15 @@ function authPage(string $title, callable $body): never
         if (code.length === 6 && !form.dataset.sent) {
             form.dataset.sent = '1';
             submit.textContent = 'Verifying…';
+            submit.disabled = true;
             form.submit();
         }
     };
+    // Stop a second submit (Enter or the Verify button) after the auto-submit already went out.
+    form.addEventListener('submit', (e) => {
+        if (form.dataset.sent) { e.preventDefault(); return; }
+        form.dataset.sent = '1';
+    });
     const fill = (start, digits) => {
         digits.split('').forEach((d, i) => { if (boxes[start + i]) boxes[start + i].value = d; });
         boxes[Math.min(start + digits.length, boxes.length - 1)].focus();

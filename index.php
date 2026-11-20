@@ -323,6 +323,12 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && !$_POST && (int) ($_SERVER['CONTENT
     header('Location: index.php');
     exit;
 }
+// A sign-in form posted again after the account is already signed in (double submit, back button, resubmit):
+// just open the app instead of failing the token check.
+if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['auth_step'])) {
+    header('Location: index.php', true, 303);
+    exit;
+}
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     $token = $_POST['csrf_token'] ?? '';
     $sessionToken = $_SESSION['csrf_token'] ?? '';
